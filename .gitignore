@@ -1,0 +1,32 @@
+# Runtime / user data
+settings.json
+log.txt
+clearlog.txt
+context_sessions/
+configs/auth/
+
+# Project config (local only)
+pyproject.toml
+uv.lock
+.python-version
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Models (downloaded at runtime)
+/models/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Gemini agent
+.gemini/
