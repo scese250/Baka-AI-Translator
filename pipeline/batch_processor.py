@@ -217,6 +217,17 @@ class BatchProcessor:
         thread_translators = {}  # {thread_id: (Translator, src_lang, tgt_lang)}
         thread_locks = {tid: Lock() for tid in range(max_workers)} if max_workers > 1 else {}
 
+        # Pre-create inpainters per thread (avoids ONNX session creation freeze per image)
+        thread_inpainters = {}
+        if max_workers > 1:
+            _inp_backend = 'onnx'
+            _inp_device = resolve_device(settings_page.is_gpu_enabled(), backend=_inp_backend)
+            _inp_key = settings_page.get_tool_selection('inpainter')
+            _InpainterClass = inpaint_map[_inp_key]
+            for tid in range(max_workers):
+                thread_inpainters[tid] = _InpainterClass(_inp_device, backend=_inp_backend)
+            logger.info(f"Pre-created {max_workers} inpainter instances for parallel mode.")
+
         # Helper for processing a single image
         def process_single_image(args):
             nonlocal local_translator, last_src, last_tgt
@@ -423,14 +434,7 @@ class BatchProcessor:
 
                 # Inpainting
                 if max_workers > 1:
-                    backend = 'onnx'
-                    # Force CPU or use setting? User said "Usaré la CPU".
-                    # Let's honor settings.is_gpu_enabled() but usually CPU is safer for parallel.
-                    # But we'll trust user config.
-                    device = resolve_device(settings_page.is_gpu_enabled(), backend=backend)
-                    inpainter_key = settings_page.get_tool_selection('inpainter')
-                    InpainterClass = inpaint_map[inpainter_key]
-                    local_inpainter = InpainterClass(device, backend=backend)
+                    local_inpainter = thread_inpainters[thread_id]
                 else:
                     if self.inpainting.inpainter_cache is None or self.inpainting.cached_inpainter_key != settings_page.get_tool_selection('inpainter'):
                         backend = 'onnx'
@@ -492,17 +496,19 @@ class BatchProcessor:
                     return
 
                 # Translation
-                extra_context = settings_page.get_llm_settings()['extra_context']
+                llm_s = settings_page.get_llm_settings()
+                extra_context = llm_s['extra_context'] if llm_s.get('extra_context_enabled', True) else ''
                 translator_key = settings_page.get_tool_selection('translator')
-                
-                # Acquire per-thread lock to prevent concurrent chat use (parallel mode)
+
+                # Per-thread lock to serialize translation calls (prevents concurrent chat interleaving)
                 _thread_lock = thread_locks.get(thread_id) if max_workers > 1 else None
                 if _thread_lock:
                     _thread_lock.acquire()
-                
+
                 try:
+                    # Use local_translator for parallel (with per-thread caching for chat persistence)
                     if max_workers > 1:
-                        # Reuse translator if same languages (preserves chat context per thread)
+                        # Check if we already have a cached translator for this thread
                         cached = thread_translators.get(thread_id)
                         if cached and cached[1] == source_lang and cached[2] == target_lang:
                             local_translator_obj = cached[0]
@@ -543,7 +549,7 @@ class BatchProcessor:
                     translation_cache_key = self.cache_manager._get_translation_cache_key(
                         image, source_lang, target_lang, translator_key, extra_context
                     )
-                    
+
                     try:
                         t0 = time.time()
                         local_translator_obj.translate(blk_list, image, extra_context, extension)
@@ -566,7 +572,7 @@ class BatchProcessor:
                         self.skip_save(directory, timestamp, base_name, extension, archive_bname, image)
                         self.main_page.image_skipped.emit(image_path, "Translator", err_msg)
                         self.log_skipped_image(directory, timestamp, image_path, reason, full_traceback)
-                        
+
                         if ("accounts failed" in err_msg and "Gemini Web Error" in err_msg) or "CAMBIO DE MODELO" in err_msg:
                              # Fatal error - stop batch completely
                              self.main_page.current_worker.cancel()

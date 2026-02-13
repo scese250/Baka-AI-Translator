@@ -20,7 +20,8 @@ class TranslationHandler:
         if self.main_page.image_viewer.hasPhoto() and self.main_page.blk_list:
             settings_page = self.main_page.settings_page
             image = self.main_page.image_viewer.get_image_array()
-            extra_context = settings_page.get_llm_settings()['extra_context']
+            llm_s = settings_page.get_llm_settings()
+            extra_context = llm_s['extra_context'] if llm_s.get('extra_context_enabled', True) else ''
             translator_key = settings_page.get_tool_selection('translator')
 
             upper_case = settings_page.ui.uppercase_checkbox.isChecked()
@@ -121,7 +122,8 @@ class TranslationHandler:
         
         # Perform translation on the visible image with filtered blocks
         settings_page = self.main_page.settings_page
-        extra_context = settings_page.get_llm_settings()['extra_context']
+        llm_s = settings_page.get_llm_settings()
+        extra_context = llm_s['extra_context'] if llm_s.get('extra_context_enabled', True) else ''
         upper_case = settings_page.ui.uppercase_checkbox.isChecked()
         
         translator = Translator(self.main_page, source_lang, target_lang)

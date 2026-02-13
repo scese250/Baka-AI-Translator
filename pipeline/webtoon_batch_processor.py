@@ -379,7 +379,8 @@ class WebtoonBatchProcessor:
         if blk_list:
             source_lang = self.main_page.image_states[vpage1.physical_page_path]['source_lang']
             target_lang = self.main_page.image_states[vpage1.physical_page_path]['target_lang']
-            extra_context = self.main_page.settings_page.get_llm_settings()['extra_context']
+            llm_s = self.main_page.settings_page.get_llm_settings()
+            extra_context = llm_s['extra_context'] if llm_s.get('extra_context_enabled', True) else ''
             
             # Only create a new translator if languages changed or it's the first chunk
             # This maintains chat context for Gemini Web API

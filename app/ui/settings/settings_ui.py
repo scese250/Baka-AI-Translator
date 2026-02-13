@@ -238,6 +238,7 @@ class SettingsPageUI(QtWidgets.QWidget):
         self.system_prompt_enabled = self.llms_page.system_prompt_enabled
         self.system_prompt = self.llms_page.system_prompt
         self.extra_context = self.llms_page.extra_context
+        self.extra_context_enabled = self.llms_page.extra_context_enabled
         self.context_session_checkbox = self.llms_page.context_session_checkbox
         self.session_name_input = self.llms_page.session_name_input
         self.gems_combo = self.llms_page.gems_combo

@@ -26,10 +26,11 @@ class LlmsPage(QtWidgets.QWidget):
 
         # Left
         left_layout = QtWidgets.QVBoxLayout()
-        prompt_label = MLabel(self.tr("Extra Context:"))
+        self.extra_context_enabled = MCheckBox(self.tr("Extra Context"))
+        self.extra_context_enabled.setChecked(True)
         self.extra_context = MTextEdit()
         self.extra_context.setMinimumHeight(200)
-        left_layout.addWidget(prompt_label)
+        left_layout.addWidget(self.extra_context_enabled)
         left_layout.addWidget(self.extra_context)
         
         # Info label for real-time editing
@@ -115,6 +116,7 @@ class LlmsPage(QtWidgets.QWidget):
         # Signals
         self.system_prompt_enabled.stateChanged.connect(self._toggle_system_prompt)
         self.context_session_checkbox.stateChanged.connect(self._toggle_session_name)
+        self.extra_context_enabled.stateChanged.connect(self._toggle_extra_context)
         self.btn_fetch_gems.clicked.connect(self._fetch_gems)
 
     def _toggle_system_prompt(self, state):
@@ -126,6 +128,10 @@ class LlmsPage(QtWidgets.QWidget):
     def _toggle_session_name(self, state):
         is_checked = (state == QtCore.Qt.CheckState.Checked.value or state == True)
         self.session_name_input.setEnabled(is_checked)
+
+    def _toggle_extra_context(self, state):
+        is_checked = (state == QtCore.Qt.CheckState.Checked.value or state == True)
+        self.extra_context.setEnabled(is_checked)
 
     def _fetch_gems(self):
         """Fetch available gems from Gemini account."""
