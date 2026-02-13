@@ -213,6 +213,10 @@ class BatchProcessor:
         last_src = None
         last_tgt = None
 
+        # Per-thread persistent translator state for parallel processing (chat persistence)
+        thread_translators = {}  # {thread_id: (Translator, src_lang, tgt_lang)}
+        thread_locks = {tid: Lock() for tid in range(max_workers)} if max_workers > 1 else {}
+
         # Helper for processing a single image
         def process_single_image(args):
             nonlocal local_translator, last_src, last_tgt
@@ -491,72 +495,86 @@ class BatchProcessor:
                 extra_context = settings_page.get_llm_settings()['extra_context']
                 translator_key = settings_page.get_tool_selection('translator')
                 
-                # Use local_translator for parallel
-                if max_workers > 1:
-                    # Create uncached engine so each thread has its own instance
-                    local_translator_obj = Translator.__new__(Translator)
-                    local_translator_obj.main_page = self.main_page
-                    local_translator_obj.settings = settings_page
-                    local_translator_obj.translator_key = translator_key
-                    local_translator_obj.source_lang = source_lang
-                    local_translator_obj.source_lang_en = self.main_page.lang_mapping.get(source_lang, source_lang)
-                    local_translator_obj.target_lang = target_lang
-                    local_translator_obj.target_lang_en = self.main_page.lang_mapping.get(target_lang, target_lang)
-                    local_translator_obj.engine = TranslationFactory.create_engine_uncached(
-                        settings_page,
-                        local_translator_obj.source_lang_en,
-                        local_translator_obj.target_lang_en,
-                        translator_key
-                    )
-                    local_translator_obj.is_llm_engine = isinstance(local_translator_obj.engine, LLMTranslation)
-                    # Assign specific Gemini account to this thread
-                    if is_gemini and gemini_account_count > 0:
-                        account_idx = thread_id % gemini_account_count
-                        if hasattr(local_translator_obj.engine, 'assign_candidate'):
-                            local_translator_obj.engine.assign_candidate(account_idx)
-                else:
-                    # Sequential Reuse Logic - reuse translator if languages haven't changed
-                    if local_translator is None or source_lang != last_src or target_lang != last_tgt:
-                         local_translator_obj = Translator(self.main_page, source_lang, target_lang)
-                         # Update for next iteration
-                         local_translator = local_translator_obj
-                         last_src = source_lang
-                         last_tgt = target_lang
-                    else:
-                        local_translator_obj = local_translator
-
-                translation_cache_key = self.cache_manager._get_translation_cache_key(
-                    image, source_lang, target_lang, translator_key, extra_context
-                )
+                # Acquire per-thread lock to prevent concurrent chat use (parallel mode)
+                _thread_lock = thread_locks.get(thread_id) if max_workers > 1 else None
+                if _thread_lock:
+                    _thread_lock.acquire()
                 
                 try:
-                    t0 = time.time()
-                    local_translator_obj.translate(blk_list, image, extra_context, extension)
-                    t1 = time.time()
-                    logger.info("\033[92mTranslation took %.2fs\033[0m", t1 - t0)
-                    self.cache_manager._cache_translation_results(translation_cache_key, blk_list)
-                except Exception as e:
-                    if isinstance(e, requests.exceptions.HTTPError):
-                        try:
-                            err_json = e.response.json()
-                            err_msg = err_json.get("error_description", str(e))
-                        except Exception:
-                            err_msg = str(e)
+                    if max_workers > 1:
+                        # Reuse translator if same languages (preserves chat context per thread)
+                        cached = thread_translators.get(thread_id)
+                        if cached and cached[1] == source_lang and cached[2] == target_lang:
+                            local_translator_obj = cached[0]
+                        else:
+                            # Create new translator for this thread
+                            local_translator_obj = Translator.__new__(Translator)
+                            local_translator_obj.main_page = self.main_page
+                            local_translator_obj.settings = settings_page
+                            local_translator_obj.translator_key = translator_key
+                            local_translator_obj.source_lang = source_lang
+                            local_translator_obj.source_lang_en = self.main_page.lang_mapping.get(source_lang, source_lang)
+                            local_translator_obj.target_lang = target_lang
+                            local_translator_obj.target_lang_en = self.main_page.lang_mapping.get(target_lang, target_lang)
+                            local_translator_obj.engine = TranslationFactory.create_engine_uncached(
+                                settings_page,
+                                local_translator_obj.source_lang_en,
+                                local_translator_obj.target_lang_en,
+                                translator_key
+                            )
+                            local_translator_obj.is_llm_engine = isinstance(local_translator_obj.engine, LLMTranslation)
+                            # Assign specific Gemini account to this thread
+                            if is_gemini and gemini_account_count > 0:
+                                account_idx = thread_id % gemini_account_count
+                                if hasattr(local_translator_obj.engine, 'assign_candidate'):
+                                    local_translator_obj.engine.assign_candidate(account_idx)
+                            thread_translators[thread_id] = (local_translator_obj, source_lang, target_lang)
                     else:
-                        err_msg = str(e)
+                        # Sequential Reuse Logic - reuse translator if languages haven't changed
+                        if local_translator is None or source_lang != last_src or target_lang != last_tgt:
+                             local_translator_obj = Translator(self.main_page, source_lang, target_lang)
+                             # Update for next iteration
+                             local_translator = local_translator_obj
+                             last_src = source_lang
+                             last_tgt = target_lang
+                        else:
+                            local_translator_obj = local_translator
 
-                    logger.exception(f"Translation failed: {err_msg}")
-                    reason = f"Translator: {err_msg}"
-                    full_traceback = traceback.format_exc()
-                    self.skip_save(directory, timestamp, base_name, extension, archive_bname, image)
-                    self.main_page.image_skipped.emit(image_path, "Translator", err_msg)
-                    self.log_skipped_image(directory, timestamp, image_path, reason, full_traceback)
+                    translation_cache_key = self.cache_manager._get_translation_cache_key(
+                        image, source_lang, target_lang, translator_key, extra_context
+                    )
                     
-                    if ("accounts failed" in err_msg and "Gemini Web Error" in err_msg) or "CAMBIO DE MODELO" in err_msg:
-                         # Fatal error - stop batch completely
-                         self.main_page.current_worker.cancel()
-                         return
-                    return
+                    try:
+                        t0 = time.time()
+                        local_translator_obj.translate(blk_list, image, extra_context, extension)
+                        t1 = time.time()
+                        logger.info("\033[92mTranslation took %.2fs\033[0m", t1 - t0)
+                        self.cache_manager._cache_translation_results(translation_cache_key, blk_list)
+                    except Exception as e:
+                        if isinstance(e, requests.exceptions.HTTPError):
+                            try:
+                                err_json = e.response.json()
+                                err_msg = err_json.get("error_description", str(e))
+                            except Exception:
+                                err_msg = str(e)
+                        else:
+                            err_msg = str(e)
+
+                        logger.exception(f"Translation failed: {err_msg}")
+                        reason = f"Translator: {err_msg}"
+                        full_traceback = traceback.format_exc()
+                        self.skip_save(directory, timestamp, base_name, extension, archive_bname, image)
+                        self.main_page.image_skipped.emit(image_path, "Translator", err_msg)
+                        self.log_skipped_image(directory, timestamp, image_path, reason, full_traceback)
+                        
+                        if ("accounts failed" in err_msg and "Gemini Web Error" in err_msg) or "CAMBIO DE MODELO" in err_msg:
+                             # Fatal error - stop batch completely
+                             self.main_page.current_worker.cancel()
+                             return
+                        return
+                finally:
+                    if _thread_lock:
+                        _thread_lock.release()
 
                 entire_raw_text = get_raw_text(blk_list)
                 entire_translated_text = get_raw_translation(blk_list)
