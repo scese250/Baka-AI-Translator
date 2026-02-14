@@ -1,5 +1,4 @@
 import numpy as np
-import browser_cookie3
 import asyncio
 import tempfile
 import os
@@ -10,16 +9,16 @@ from gemini_webapi import GeminiClient
 from .base import OCREngine
 from ..utils.textblock import TextBlock, adjust_text_line_coordinates
 from app.ui.settings.settings_page import SettingsPage
+from app.auth import AuthSource, BrowserManager
 
 class GeminiWebOCR(OCREngine):
-    """OCR engine using Google Gemini Web Interface via Cookies."""
+    """OCR engine using Google Gemini Web Interface via auth files."""
     
     def __init__(self):
         self.client = None
         self.candidates = []
         self.model = 'gemini-2.0-flash' # Default underlying model
         self.expansion_percentage = 5
-        self.browser_name = 'Firefox'
         self.current_candidate_index = 0
         self.img_as_llm_input = True # Always true for OCR
         
@@ -43,90 +42,35 @@ class GeminiWebOCR(OCREngine):
         # Fallback if somehow empty or weird, though factory ensures it comes from minimal set
         if not self.model: self.model = "gemini-2.0-flash"
         
-        credentials = settings.get_credentials(settings.ui.tr('Google Gemini'))
-        self.browser_name = credentials.get('browser', 'Firefox')
-        
         self._init_client()
 
     def _init_client(self):
-        """Loads cookies from Cookies.txt or browser into self.candidates."""
-        print(f"Initializing Gemini Web OCR Client (Browser: {self.browser_name})...")
+        """Loads accounts from auth files in configs/auth/."""
+        print(f"[Gemini Web OCR] Loading accounts from auth files...")
         
         self.candidates = []
         
-        # 1. Load from Cookies.txt
         try:
-            current_dir = os.path.dirname(__file__)
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
-            cookies_file = os.path.join(project_root, "Cookies.txt")
+            auth_source = AuthSource()
+            browser_manager = BrowserManager(auth_source)
             
-            if os.path.exists(cookies_file):
-                with open(cookies_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                
-                blocks = []
-                depth = 0
-                start = 0
-                for i, char in enumerate(content):
-                    if char == '[':
-                        if depth == 0: start = i
-                        depth += 1
-                    elif char == ']':
-                        depth -= 1
-                        if depth == 0: blocks.append(content[start:i+1])
-                
-                if not blocks and content.strip(): 
-                     stripped = content.strip()
-                     if stripped.startswith("["): blocks.append(stripped)
-                     elif '{' in stripped: blocks.append(stripped)
-
-                for index, block in enumerate(blocks):
-                    try:
-                        block = block.strip()
-                        if not block: continue
-                        data = json.loads(block)
-                        if isinstance(data, dict): data = [data]
-                        
-                        found_psid = next((c.get('value') for c in data if isinstance(c, dict) and c.get('name') == "__Secure-1PSID"), None)
-                        found_psidts = next((c.get('value') for c in data if isinstance(c, dict) and c.get('name') == "__Secure-1PSIDTS"), None)
-                        
-                        if found_psid:
-                            self.candidates.append({
-                                'psid': found_psid,
-                                'psidts': found_psidts,
-                                'label': f"Account {len(self.candidates) + 1} (File)"
-                            })
-                    except json.JSONDecodeError: continue
-
-            # 2. Browser Fallback
-            if not self.candidates:
-                cj = None
-                domain = ".google.com"
-                if self.browser_name == 'Firefox': cj = browser_cookie3.firefox(domain_name=domain)
-                elif self.browser_name == 'Chrome': cj = browser_cookie3.chrome(domain_name=domain)
-                elif self.browser_name == 'Edge': cj = browser_cookie3.edge(domain_name=domain)
-                elif self.browser_name == 'Opera': cj = browser_cookie3.opera(domain_name=domain)
-                elif self.browser_name == 'Brave': cj = browser_cookie3.brave(domain_name=domain)
-                elif self.browser_name == 'Chromium': cj = browser_cookie3.chromium(domain_name=domain)
-                else: cj = browser_cookie3.load(domain_name=domain)
-                
-                secure_1psid = next((c.value for c in cj if c.name == "__Secure-1PSID"), None)
-                secure_1psidts = next((c.value for c in cj if c.name == "__Secure-1PSIDTS"), None)
-                
-                if secure_1psid:
+            for idx in auth_source.rotation_indices:
+                result = browser_manager.get_cookies_from_auth(idx)
+                if result and result.get('psid'):
                     self.candidates.append({
-                        'psid': secure_1psid,
-                        'psidts': secure_1psidts,
-                        'label': f"Browser ({self.browser_name})"
+                        'psid': result['psid'],
+                        'psidts': result.get('psidts'),
+                        'label': result.get('account_name', f'Account #{idx}')
                     })
 
         except Exception as e:
-            print(f"[Gemini Web OCR] Error loading cookies: {e}")
+            print(f"[Gemini Web OCR] Error loading auth files: {e}")
 
         if not self.candidates:
-            print("[Gemini Web OCR] ERROR: No candidates found.")
+            print("[Gemini Web OCR] ERROR: No accounts found in configs/auth/.")
             self.client = None
         else:
+            print(f"[Gemini Web OCR] Loaded {len(self.candidates)} accounts from auth files.")
             first = self.candidates[0]
             self.client = GeminiClient(first['psid'], first['psidts'] if first['psidts'] else None)
 
