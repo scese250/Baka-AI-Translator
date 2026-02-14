@@ -16,7 +16,7 @@ def main():
     
     # Create file handler (overwrites on each session)
     file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s'))
     
     # Create console handler
@@ -25,9 +25,13 @@ def main():
     
     # Configure root logger
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         handlers=[file_handler, console_handler]
     )
+    
+    # Silence noisy third-party loggers
+    for noisy in ['httpx', 'httpcore', 'PIL', 'urllib3', 'asyncio']:
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     
     # Also redirect print statements to log file
     class TeeOutput:

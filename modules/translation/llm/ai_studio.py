@@ -109,8 +109,8 @@ class AIStudioTranslation(BaseLLMTranslation):
         # Get credentials (use "AIStudio" as the service key)
         credentials = settings.get_credentials("AIStudio")
         if credentials:
-            base_url = credentials.get('base_url', '').strip()
-            api_key = credentials.get('api_key', '').strip()
+            base_url = (credentials.get('base_url') or '').strip()
+            api_key = (credentials.get('api_key') or '').strip()
             if base_url:
                 self.base_url = base_url
             if api_key:
@@ -202,7 +202,7 @@ class AIStudioTranslation(BaseLLMTranslation):
                         "url": f"data:{mime_type};base64,{img_str}"
                     }
                 })
-                logger.info(f"[AIStudio] [DEBUG] Image added to request ({mime_type})")
+                logger.info(f"[AIStudio] Image attached ({mime_type})")
             except Exception as e:
                 logger.error(f"[AIStudio] Failed to encode image: {e}")
         
@@ -219,24 +219,7 @@ class AIStudioTranslation(BaseLLMTranslation):
             "max_tokens": self.max_tokens if hasattr(self, 'max_tokens') else 65536
         }
         
-        # DEBUG: Log payload (excluding base64 image data for readability)
-        debug_payload = payload.copy()
-        debug_messages = []
-        for msg in debug_payload.get('messages', []):
-            debug_msg = {'role': msg['role']}
-            if isinstance(msg.get('content'), list):
-                debug_content = []
-                for part in msg['content']:
-                    if part.get('type') == 'image_url':
-                        debug_content.append({'type': 'image_url', 'image_url': {'url': '<BASE64_IMAGE_REDACTED>'}})
-                    else:
-                        debug_content.append(part)
-                debug_msg['content'] = debug_content
-            else:
-                debug_msg['content'] = msg.get('content')
-            debug_messages.append(debug_msg)
-        debug_payload['messages'] = debug_messages
-        logger.info(f"[AIStudio] [DEBUG] Sending payload: {json.dumps(debug_payload, indent=2, ensure_ascii=False)}")
+        logger.info(f"[AIStudio] Request: model={self.model} | image={'yes' if any(p.get('type')=='image_url' for m in messages for p in (m.get('content') if isinstance(m.get('content'), list) else [])) else 'no'} | prompt_len={len(user_prompt)}")
         
         # Retry logic
         last_error = None
@@ -281,10 +264,11 @@ class AIStudioTranslation(BaseLLMTranslation):
                 
                 # Parse response
                 result = response.json()
-                logger.info(f"[AIStudio] [DEBUG] Raw response: {json.dumps(result, indent=2, ensure_ascii=False)}")
+                usage = result.get('usage', {})
+                logger.info(f"[AIStudio] Response OK | tokens: {usage.get('total_tokens', '?')} (prompt={usage.get('prompt_tokens', '?')}, completion={usage.get('completion_tokens', '?')})")
                 
                 translated_text = result['choices'][0]['message']['content']
-                logger.info(f"[AIStudio] [DEBUG] Extracted content: {repr(translated_text)}")
+                logger.info(f"[AIStudio] Translation received ({len(translated_text)} chars)")
                 
                 # Check for empty response - this can happen with certain API issues
                 if not translated_text or translated_text.strip() == "":

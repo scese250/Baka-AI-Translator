@@ -36,16 +36,7 @@ class GeminiTranslation(BaseLLMTranslation):
         self._browser_manager = None
         self._auth_initialized = False
         
-        # Model fallback detection
-        self.response_times = []  # Track last N response times
-        self.avg_response_time = None  # Calculated average
-        self.consecutive_anomalies = 0  # Counter for fast responses
-        self.anomaly_threshold = 3  # Alert after N consecutive anomalies
-        self.time_ratio_threshold = 0.4  # Response < 40% of avg = anomaly
-        
-        # Periodic model verification
-        self.translations_since_check = 0  # Counter for translations since last model verification
-        self.verify_interval = 3  # Verify model every N translations
+
         
         # Thread-safe: each thread gets its own event loop
         self._thread_local = threading.local()
@@ -294,36 +285,7 @@ class GeminiTranslation(BaseLLMTranslation):
         except Exception as e:
             print(f"[Gemini] Error saving session '{session_name}': {e}")
 
-    def _check_response_time_anomaly(self, response_time: float) -> bool:
-        """
-        Check if response time indicates possible model fallback.
-        Returns True if anomaly threshold reached (should alert user).
-        """
-        # Require minimum samples before detection
-        if len(self.response_times) < 5:
-            self.response_times.append(response_time)
-            self.avg_response_time = sum(self.response_times) / len(self.response_times)
-            return False
-        
-        # Check if response is anomalously fast (Flash is ~3x faster than Pro)
-        is_anomaly = response_time < (self.avg_response_time * self.time_ratio_threshold)
-        
-        if is_anomaly:
-            self.consecutive_anomalies += 1
-            print(f"⚠️ [Model Check] Response {response_time:.1f}s is {response_time/self.avg_response_time:.0%} of avg {self.avg_response_time:.1f}s (anomaly {self.consecutive_anomalies}/{self.anomaly_threshold})")
-        else:
-            # Normal response - reset counter and update average
-            self.consecutive_anomalies = 0
-            self.response_times.append(response_time)
-            # Keep only last 20 samples
-            if len(self.response_times) > 20:
-                self.response_times = self.response_times[-20:]
-            self.avg_response_time = sum(self.response_times) / len(self.response_times)
-        
-        # Return True if threshold reached
-        if self.consecutive_anomalies >= self.anomaly_threshold:
-            return True
-        return False
+
 
     async def _verify_model_version(self, chat) -> tuple[bool, str]:
         """
@@ -409,7 +371,7 @@ class GeminiTranslation(BaseLLMTranslation):
         async def run_analysis():
             # Initialize client if needed
             if not hasattr(self, '_active_client') or self._active_client is None:
-                await self.client.init(timeout=60, auto_close=False, auto_refresh=False)
+                await self.client.init(timeout=30, auto_close=False, auto_refresh=False)
                 self._active_client = self.client
             return await self._run_textless_analysis(self._active_client, image)
         
@@ -538,6 +500,10 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
         # --- ADVANCED CONTEXT AWARENESS LOGIC ---
         use_advanced_workflow = self.advanced_context_aware and image is not None
 
+        # Model-aware timeout: Pro can be slow, Flash should be fast
+        is_pro_model = "pro" in self.model.lower() if self.model else False
+        request_timeout = 300 if is_pro_model else 90
+
         try:
             async def run_generate():
                 # 0. Try reusing existing client first to avoid login-spam
@@ -600,7 +566,7 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
                     temp_client = GeminiClient(candidate['psid'], candidate['psidts'] if candidate['psidts'] else None)
                     
                     try:
-                        await temp_client.init(timeout=999, auto_close=False, auto_refresh=False)
+                        await temp_client.init(timeout=30, auto_close=False, auto_refresh=False)
                         
                         # [FIX] Update index BEFORE attempt so logs show correct account
                         self.current_candidate_index = attempt_idx
@@ -663,25 +629,16 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
                 self._thread_local.loop = asyncio.new_event_loop()
             loop = self._thread_local.loop
             
-            # Measure response time for model fallback detection
-            start_time = time.time()
-            result = loop.run_until_complete(asyncio.wait_for(run_generate(), timeout=300))
-            elapsed_time = time.time() - start_time
-            
-            # Check for model fallback based on response time
-            if self._check_response_time_anomaly(elapsed_time):
-                raise Exception(
-                    f"🛑 POSIBLE CAMBIO DE MODELO DETECTADO\n"
-                    f"   Las últimas {self.anomaly_threshold} respuestas fueron anormalmente rápidas.\n"
-                    f"   Esto puede indicar que Gemini cambió de {self.model} a un modelo inferior.\n"
-                    f"   Promedio normal: {self.avg_response_time:.1f}s | Últimas: ~{elapsed_time:.1f}s\n"
-                    f"   Opciones: Esperar 1 hora para renovar cuota Pro, o cambiar a Flash manualmente."
-                )
-            
+
+            result = loop.run_until_complete(asyncio.wait_for(run_generate(), timeout=request_timeout))
             return result
 
         except asyncio.TimeoutError:
-             raise Exception(f"Gemini Timeout: The request took longer than 300s.")
+             # CRITICAL: Clear stale client/chat so the next retry goes through round-robin
+             # with fresh clients instead of reusing the same dead connection forever.
+             self.client = None
+             self.chat = None
+             raise Exception(f"Gemini Timeout: The request took longer than {request_timeout}s. Connection reset for next retry.")
         except Exception as e:
             error_msg = str(e)
             if not error_msg: 

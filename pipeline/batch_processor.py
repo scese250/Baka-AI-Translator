@@ -53,7 +53,7 @@ class BatchProcessor:
         # Do not save skipped images to a separate folder or logs
         pass
 
-    def emit_progress(self, index, total, step, steps, change_name):
+    def emit_progress(self, index, total, step, steps, change_name, filename=""):
         """Wrapper around main_page.progress_update.emit that logs a human-readable stage."""
         stage_map = {
             0: 'start-image',
@@ -67,7 +67,8 @@ class BatchProcessor:
             10: 'save-and-finish',
         }
         stage_name = stage_map.get(step, f'stage-{step}')
-        logger.info(f"Progress: image_index={index}/{total} step={step}/{steps} ({stage_name}) change_name={change_name}")
+        file_tag = f" [{filename}]" if filename else ""
+        logger.info(f"Progress: image_index={index}/{total} step={step}/{steps} ({stage_name}){file_tag}")
         self.main_page.progress_update.emit(index, total, step, steps, change_name)
 
     def log_skipped_image(self, directory, timestamp, image_path, reason="", full_traceback=""):
@@ -240,9 +241,10 @@ class BatchProcessor:
 
                 # --- Start of processing logic (copied and adapted from original loop) ---
                 file_on_display = self.main_page.image_files[self.main_page.curr_img_idx]
+                _fname = os.path.basename(image_path)
 
                 # index, step, total_steps, change_name
-                self.emit_progress(index, total_images, 0, 10, True)
+                self.emit_progress(index, total_images, 0, 10, True, _fname)
 
                 source_lang = self.main_page.image_states[image_path]['source_lang']
                 target_lang = self.main_page.image_states[image_path]['target_lang']
@@ -309,7 +311,7 @@ class BatchProcessor:
                     return
 
                 # Text Block Detection
-                self.emit_progress(index, total_images, 1, 10, False)
+                self.emit_progress(index, total_images, 1, 10, False, _fname)
                 if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
                     return
 
@@ -338,7 +340,7 @@ class BatchProcessor:
 
                 logger.info("\033[92mText detection took %.2fs\033[0m", t1 - t0)
                 
-                self.emit_progress(index, total_images, 2, 10, False)
+                self.emit_progress(index, total_images, 2, 10, False, _fname)
                 if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
                     return
 
@@ -421,11 +423,11 @@ class BatchProcessor:
                     sv_pth = os.path.join(render_save_dir, f"{base_name}{extension}")
                     imk.write_image(sv_pth, image)
                     
-                    self.emit_progress(index, total_images, 10, 10, False)
+                    self.emit_progress(index, total_images, 10, 10, False, _fname)
                     update_global_progress()
                     return
 
-                self.emit_progress(index, total_images, 3, 10, False)
+                self.emit_progress(index, total_images, 3, 10, False, _fname)
                 if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
                     return
 
@@ -459,7 +461,7 @@ class BatchProcessor:
                     mask = np.zeros(image.shape[:2], dtype=np.uint8)
                 t1 = time.time()
 
-                self.emit_progress(index, total_images, 4, 10, False)
+                self.emit_progress(index, total_images, 4, 10, False, _fname)
                 if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
                     return
 
@@ -491,7 +493,7 @@ class BatchProcessor:
                     path = get_save_path("cleaned_images", archive_bname)
                     imk.write_image(os.path.join(path, f"{base_name}_cleaned{extension}"), inpaint_input_img)
 
-                self.emit_progress(index, total_images, 5, 10, False)
+                self.emit_progress(index, total_images, 5, 10, False, _fname)
                 if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
                     return
 
@@ -554,7 +556,7 @@ class BatchProcessor:
                         t0 = time.time()
                         local_translator_obj.translate(blk_list, image, extra_context, extension)
                         t1 = time.time()
-                        logger.info("\033[92mTranslation took %.2fs\033[0m", t1 - t0)
+                        logger.info("\033[92mTranslation took %.2fs [%s]\033[0m", t1 - t0, f"{base_name}{extension}")
                         self.cache_manager._cache_translation_results(translation_cache_key, blk_list)
                     except Exception as e:
                         if isinstance(e, requests.exceptions.HTTPError):
@@ -566,7 +568,7 @@ class BatchProcessor:
                         else:
                             err_msg = str(e)
 
-                        logger.exception(f"Translation failed: {err_msg}")
+                        logger.exception(f"Translation failed [{base_name}{extension}]: {err_msg}")
                         reason = f"Translator: {err_msg}"
                         full_traceback = traceback.format_exc()
                         self.skip_save(directory, timestamp, base_name, extension, archive_bname, image)
@@ -609,7 +611,7 @@ class BatchProcessor:
                     with open(os.path.join(path, os.path.splitext(os.path.basename(image_path))[0] + "_translated.txt"), 'w', encoding='UTF-8') as file:
                         file.write(entire_translated_text)
 
-                self.emit_progress(index, total_images, 7, 10, False)
+                self.emit_progress(index, total_images, 7, 10, False, _fname)
                 if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
                     return
 
@@ -722,7 +724,7 @@ class BatchProcessor:
                     'push_to_stack': True
                     })
                 
-                self.emit_progress(index, total_images, 9, 10, False)
+                self.emit_progress(index, total_images, 9, 10, False, _fname)
                 if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
                     return
 
@@ -743,7 +745,7 @@ class BatchProcessor:
                 renderer.add_state_to_image(viewer_state)
                 renderer.save_image(sv_pth, _image_quality)
 
-                self.emit_progress(index, total_images, 10, 10, False)
+                self.emit_progress(index, total_images, 10, 10, False, _fname)
                 update_global_progress()
 
             except Exception as e:
