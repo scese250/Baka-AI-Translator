@@ -97,6 +97,7 @@ class LlmsPage(QtWidgets.QWidget):
         self.system_prompt = MTextEdit()
         self.system_prompt.setMinimumHeight(200)
         self.system_prompt.setEnabled(False)
+        self.system_prompt.setStyleSheet("color: #888;")
         self.system_prompt.setPlaceholderText(self.tr("System Prompt..."))
 
         left_layout.addWidget(self.system_prompt_enabled)
@@ -122,6 +123,7 @@ class LlmsPage(QtWidgets.QWidget):
     def _toggle_system_prompt(self, state):
         is_checked = (state == QtCore.Qt.CheckState.Checked.value or state == True)
         self.system_prompt.setEnabled(is_checked)
+        self.system_prompt.setStyleSheet("" if is_checked else "color: #888;")
         if is_checked and not self.system_prompt.toPlainText().strip():
             self.system_prompt.setPlainText(DEFAULT_SYSTEM_PROMPT)
 
@@ -132,6 +134,7 @@ class LlmsPage(QtWidgets.QWidget):
     def _toggle_extra_context(self, state):
         is_checked = (state == QtCore.Qt.CheckState.Checked.value or state == True)
         self.extra_context.setEnabled(is_checked)
+        self.extra_context.setStyleSheet("" if is_checked else "color: #888;")
 
     def _fetch_gems(self):
         """Fetch available gems from Gemini account."""
