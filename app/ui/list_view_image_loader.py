@@ -40,16 +40,18 @@ class ImageLoadWorker(QObject):
         self.process_timer.stop()
         
     def process_queue(self):
-        """Process the loading queue."""
+        """Process the loading queue in batches for faster thumbnail loading."""
         if not self.load_queue or self.should_stop:
             return
-            
-        index, file_path, target_size = self.load_queue.pop(0)
         
-        # Load and resize image
-        pixmap = self._load_and_resize_image(file_path, target_size)
-        if pixmap and not pixmap.isNull():
-            self.image_loaded.emit(index, pixmap)
+        batch_size = min(5, len(self.load_queue))
+        for _ in range(batch_size):
+            if not self.load_queue or self.should_stop:
+                return
+            index, file_path, target_size = self.load_queue.pop(0)
+            pixmap = self._load_and_resize_image(file_path, target_size)
+            if pixmap and not pixmap.isNull():
+                self.image_loaded.emit(index, pixmap)
                 
     def _load_and_resize_image(self, file_path: str, target_size: QSize) -> QPixmap:
         """Load and resize an image to the target size."""
@@ -181,24 +183,26 @@ class ListViewImageLoader:
         self.visible_items = new_visible_items
         
     def _get_visible_item_indices(self) -> Set[int]:
-        """Get indices of currently visible items."""
-        visible_indices = set()
-        
-        if not self.list_widget:
-            return visible_indices
-            
-        # Get the viewport rect
-        viewport_rect = self.list_widget.viewport().rect()
-        
-        # Check each item to see if it's visible
-        for i in range(self.list_widget.count()):
-            item = self.list_widget.item(i)
-            if item:
-                item_rect = self.list_widget.visualItemRect(item)
-                if viewport_rect.intersects(item_rect):
-                    visible_indices.add(i)
-                    
-        return visible_indices
+        """Get indices of currently visible items using indexAt() for O(1) calculation."""
+        if not self.list_widget or self.list_widget.count() == 0:
+            return set()
+
+        viewport = self.list_widget.viewport()
+        viewport_rect = viewport.rect()
+
+        # Use indexAt for O(1) lookup of first and last visible items
+        top_index = self.list_widget.indexAt(viewport_rect.topLeft())
+        bottom_index = self.list_widget.indexAt(viewport_rect.bottomLeft())
+
+        first = top_index.row() if top_index.isValid() else 0
+        last = bottom_index.row() if bottom_index.isValid() else self.list_widget.count() - 1
+
+        if first < 0:
+            first = 0
+        if last < 0:
+            last = self.list_widget.count() - 1
+
+        return set(range(first, last + 1))
         
     def _queue_image_load(self, index: int):
         """Queue an image for loading."""

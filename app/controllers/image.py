@@ -5,6 +5,7 @@ import imkit as imk
 import numpy as np
 from typing import TYPE_CHECKING, List
 from PySide6 import QtCore, QtWidgets, QtGui
+from PySide6.QtCore import QTimer
 
 from app.ui.dayu_widgets.clickable_card import ClickMeta
 from app.ui.dayu_widgets.message import MMessage
@@ -182,12 +183,31 @@ class ImageStateController:
             self.main.current_history_index[self.main.image_files[0]] = 0
             self.save_image_state(self.main.image_files[0])
 
-        for file in self.main.image_files:
+        # Chunked state initialization to avoid blocking the UI
+        self._pending_state_files = list(self.main.image_files)
+        self._process_state_init_chunk()
+
+    def _process_state_init_chunk(self, chunk_size=15):
+        """Process state initialization in chunks to keep the UI responsive."""
+        if not self._pending_state_files:
+            # All state initialized — proceed to card creation
+            self._finish_initial_load()
+            return
+
+        chunk = self._pending_state_files[:chunk_size]
+        self._pending_state_files = self._pending_state_files[chunk_size:]
+
+        for file in chunk:
             self.save_image_state(file)
             stack = QtGui.QUndoStack(self.main)
             self.main.undo_stacks[file] = stack
             self.main.undo_group.addStack(stack)
 
+        # Yield to event loop then process next chunk
+        QTimer.singleShot(0, self._process_state_init_chunk)
+
+    def _finish_initial_load(self):
+        """Called after all state initialization chunks are done."""
         if self.main.image_files:
             self.main.page_list.blockSignals(True)
             self.update_image_cards()
@@ -206,28 +226,39 @@ class ImageStateController:
         self.main.image_cards.clear()
         self.main.current_card = None
 
-        # Add new items
-        for index, file_path in enumerate(self.main.image_files):
+        # Chunked card creation to avoid blocking the UI
+        self._pending_card_files = list(enumerate(self.main.image_files))
+        self._process_card_chunk()
+
+    def _process_card_chunk(self, chunk_size=15):
+        """Process card creation in chunks to keep the UI responsive."""
+        if not self._pending_card_files:
+            # All cards created — initialize lazy loading
+            self.page_list_loader.set_file_paths(
+                self.main.image_files, self.main.image_cards)
+            return
+
+        chunk = self._pending_card_files[:chunk_size]
+        self._pending_card_files = self._pending_card_files[chunk_size:]
+
+        for index, file_path in chunk:
             file_name = os.path.basename(file_path)
             list_item = QtWidgets.QListWidgetItem(file_name)
             card = ClickMeta(extra=False, avatar_size=(35, 50))
             card.setup_data({
                 "title": file_name,
-                # Avatar will be loaded lazily
             })
-            
-            # Set the list item size hint to match the card size
+
             list_item.setSizeHint(card.sizeHint())
-            
-            # re-apply strike-through if previously skipped
+
             if self.main.image_states.get(file_path, {}).get('skip'):
                 card.set_skipped(True)
             self.main.page_list.addItem(list_item)
             self.main.page_list.setItemWidget(list_item, card)
             self.main.image_cards.append(card)
 
-        # Initialize lazy loading for the new cards
-        self.page_list_loader.set_file_paths(self.main.image_files, self.main.image_cards)
+        # Yield to event loop then process next chunk
+        QTimer.singleShot(0, self._process_card_chunk)
 
     def on_card_selected(self, current, previous):
         if current:  

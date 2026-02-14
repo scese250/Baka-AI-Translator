@@ -109,8 +109,8 @@ class ClickMeta(QtWidgets.QWidget):
         super(ClickMeta, self).__init__(parent)
         self.setAttribute(QtCore.Qt.WA_StyledBackground)
 
-        # Initialize Widgets
-        self._cover_label = QtWidgets.QLabel()
+        # Initialize Widgets (cover label is created lazily in setup_data)
+        self._cover_label = None
         self._avatar = MAvatar()
         self._title_label = MLabel().secondary()
         self._description_label = MLabel().secondary()
@@ -145,14 +145,13 @@ class ClickMeta(QtWidgets.QWidget):
 
         self._button_layout = QtWidgets.QHBoxLayout()
 
-        main_lay = QtWidgets.QVBoxLayout()
-        main_lay.setSpacing(0)
-        main_lay.setContentsMargins(1, 1, 1, 1)
-        main_lay.addWidget(self._cover_label)
-        main_lay.addLayout(avatar_content_layout)
-        main_lay.addLayout(self._button_layout)
-        self.setLayout(main_lay)
-        self._cover_label.setFixedSize(QtCore.QSize(200, 200))
+        self._main_lay = QtWidgets.QVBoxLayout()
+        self._main_lay.setSpacing(0)
+        self._main_lay.setContentsMargins(1, 1, 1, 1)
+        # Cover label slot will be inserted at index 0 when needed
+        self._main_lay.addLayout(avatar_content_layout)
+        self._main_lay.addLayout(self._button_layout)
+        self.setLayout(self._main_lay)
         # Set a fixed size for the avatar
         if avatar_size:
             w, h = avatar_size
@@ -193,12 +192,17 @@ class ClickMeta(QtWidgets.QWidget):
             self._avatar.setVisible(False)
 
         if data_dict.get("cover"):
+            if self._cover_label is None:
+                self._cover_label = QtWidgets.QLabel()
+                self._cover_label.setFixedSize(QtCore.QSize(200, 200))
+                self._cover_label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+                self._main_lay.insertWidget(0, self._cover_label)
             fixed_height = self._cover_label.width()
             self._cover_label.setPixmap(
                 data_dict.get("cover").scaledToWidth(fixed_height, QtCore.Qt.SmoothTransformation)
             )
             self._cover_label.setVisible(True)
-        else:
+        elif self._cover_label is not None:
             self._cover_label.setVisible(False)
 
         if "clicked" in data_dict and callable(data_dict["clicked"]):
@@ -251,7 +255,7 @@ class ClickMeta(QtWidgets.QWidget):
     def sizeHint(self):
         """Return appropriate size hint based on avatar size and content."""
         # If a cover is visible it sits above content and controls the width/height mainly
-        cover_size = self._cover_label.size() if self._cover_label.isVisible() else QtCore.QSize(0, 0)
+        cover_size = self._cover_label.size() if (self._cover_label is not None and self._cover_label.isVisible()) else QtCore.QSize(0, 0)
 
         # Avatar dimensions: only count if avatar widget is visible
         if self._avatar.isVisible():
