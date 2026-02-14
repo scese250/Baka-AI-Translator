@@ -53,9 +53,14 @@ class MAvatar(QtWidgets.QLabel):
         self._set_dayu_image()
 
     def _set_dayu_image(self):
-        self._pixmap = self._pixmap.scaled(self.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        # Use minimumSize() instead of size() — when setFixedSize() is used,
+        # minimumSize() returns the fixed size reliably, while size() can return
+        # a compressed/zero size if the layout hasn't been computed yet.
+        target_size = self.minimumSize()
+        if target_size.isEmpty():
+            target_size = self.size()
+        self._pixmap = self._pixmap.scaled(target_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
         self.setPixmap(self._pixmap)
-        # self.setPixmap(self._pixmap.scaledToWidth(self.width(), QtCore.Qt.SmoothTransformation))
 
     def set_dayu_image(self, value):
         """

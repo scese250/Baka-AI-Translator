@@ -511,7 +511,7 @@ class SettingsPage(QtWidgets.QWidget):
                     self.ui.credential_widgets[f"{translated_service}_api_key"].setText(settings.value(f"{translated_service}_api_key", ''))
                     self.ui.credential_widgets[f"{translated_service}_folder_id"].setText(settings.value(f"{translated_service}_folder_id", ''))
                 elif translated_service == "AIStudioToAPI":
-                    self.ui.credential_widgets[f"{translated_service}_base_url"].setText(settings.value(f"{translated_service}_base_url", 'http://localhost:7860/v1'))
+                    self.ui.credential_widgets[f"{translated_service}_base_url"].setText(settings.value(f"{translated_service}_base_url", 'http://localhost:7860/v1/chat/completions'))
                     self.ui.credential_widgets[f"{translated_service}_api_key"].setText(settings.value(f"{translated_service}_api_key", '123456'))
                 elif translated_service == "Google Gemini":
                     pass # Handled via Cookies.txt

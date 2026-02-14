@@ -119,8 +119,8 @@ class ListViewImageLoader:
                 scrollbar.valueChanged.connect(self._on_scroll)
         
         # Configuration
-        self.max_loaded_images = 20  # Maximum images to keep in memory
-        self.preload_buffer = 2  # Number of items to preload outside visible area
+        self.max_loaded_images = 100  # Maximum images to keep in memory (thumbnails are small)
+        self.preload_buffer = 5  # Number of items to preload outside visible area
         
     def set_file_paths(self, file_paths: list[str], cards: list):
         """Set the file paths and card references for lazy loading."""
@@ -240,15 +240,15 @@ class ListViewImageLoader:
         if len(self.loaded_images) <= self.max_loaded_images:
             return
             
-        # Find items to unload (not in needed_items)
-        items_to_unload = []
-        for index in self.loaded_images.keys():
-            if index not in needed_items:
-                items_to_unload.append(index)
+        # Find items to unload (strictly NOT in needed_items)
+        items_to_unload = [
+            index for index in self.loaded_images
+            if index not in needed_items
+        ]
                 
-        # Unload excess items
+        # Unload excess items, furthest from visible area first
+        items_to_unload.sort()
         excess_count = len(self.loaded_images) - self.max_loaded_images
-        items_to_unload.sort()  # Unload in order
         
         for i, index in enumerate(items_to_unload):
             if i >= excess_count:
@@ -257,10 +257,11 @@ class ListViewImageLoader:
             # Remove from memory
             del self.loaded_images[index]
             
-            # Hide avatar in card
+            # Reset avatar to default state instead of hiding
             if 0 <= index < len(self.cards):
                 card = self.cards[index]
                 if card and hasattr(card, '_avatar'):
+                    card._avatar.set_dayu_image(None)
                     card._avatar.setVisible(False)
                     
     def force_load_image(self, index: int):

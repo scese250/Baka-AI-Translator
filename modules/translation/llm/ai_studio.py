@@ -26,7 +26,7 @@ class AIStudioTranslation(BaseLLMTranslation):
     def __init__(self):
         super().__init__()
         self.session = None
-        self.base_url = "http://localhost:7860/v1"
+        self.base_url = "http://localhost:7860/v1/chat/completions"
         self.api_key = "123456"
         self.model = "gemini-3-flash-preview"
         self.timeout = 120  # 2 minutes for image-heavy requests
@@ -118,7 +118,7 @@ class AIStudioTranslation(BaseLLMTranslation):
         
         # Fallback: Try to load from AIStudioToAPI .env file if base_url is default or empty
         # This supports the user's specific folder structure automatically
-        if self.base_url == "http://localhost:7860/v1" or not self.base_url:
+        if self.base_url == "http://localhost:7860/v1/chat/completions" or not self.base_url:
             potential_env_path = r"c:\Users\Yisus\Documents\LunaTranslator\AIStudioToAPI\.env"
             if os.path.exists(potential_env_path):
                 try:

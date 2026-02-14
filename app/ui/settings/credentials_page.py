@@ -143,8 +143,8 @@ class CredentialsPage(QtWidgets.QWidget):
                 base_url_label = MLabel(self.tr("Base URL:"))
                 set_label_width(base_url_label)
                 base_url_input = MLineEdit()
-                base_url_input.setPlaceholderText("http://localhost:7860/v1")
-                base_url_input.setText("http://localhost:7860/v1")
+                base_url_input.setPlaceholderText("http://localhost:7860/v1/chat/completions")
+                base_url_input.setText("http://localhost:7860/v1/chat/completions")
                 self.credential_widgets[f"{normalized}_base_url"] = base_url_input
                 base_url_layout.addWidget(base_url_label)
                 base_url_layout.addWidget(base_url_input)
