@@ -304,9 +304,9 @@ class GeminiTranslation(BaseLLMTranslation):
             
             # Detect model from response
             detected = "unknown"
-            if "pro" in answer:
+            if re.search(r'\bpro\b', answer):
                 detected = "Pro"
-            elif "flash" in answer:
+            elif re.search(r'\bflash\b', answer):
                 detected = "Flash"
             
             # Check if user selected Pro but got Flash
@@ -822,11 +822,11 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
         cv2.imwrite(temp_image_path, image)
         
         try:
-            # Reuse existing chat session for context continuity, or create new one
-            if self.chat is None:
-                gem_id = await self._resolve_gem_id(client)
-                self.chat = client.start_chat(model=self.model, gem=gem_id)
-            
+            # Get current account label for logging
+            current_label = "Unknown"
+            if self.candidates and self.current_candidate_index < len(self.candidates):
+                 current_label = self.candidates[self.current_candidate_index].get('label', 'Unknown')
+
             # 1. Vision Prompt - includes model verification to detect Pro→Flash fallback
             vision_prompt = """Eres un analizador de contexto para traducción de mangas.
 Tu trabajo es mirar este panel y crear un resumen estructurado para ayudar a la traducción.
@@ -841,35 +841,34 @@ Responde con este formato EXACTO:
 
 Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."""
 
-            # Get current account label for logging
-            current_label = "Unknown"
-            if self.candidates and self.current_candidate_index < len(self.candidates):
-                 current_label = self.candidates[self.current_candidate_index].get('label', 'Unknown')
-
             print(f"[{current_label}] -> Step 1/2: Analyzing Scene...")
-            
+
+            user_selected_pro = "pro" in self.model.lower() if self.model else False
+            gem_id = await self._resolve_gem_id(client)
+
             # [RETRY LOGIC] Try up to 2 times if model hallucinates "Flash"
+            # Each attempt uses a FRESH chat to avoid hallucination from conversational context
             scene_analysis = ""
             for attempt in range(2):
-                vision_response = await self.chat.send_message(vision_prompt, files=[temp_image_path])
+                check_chat = client.start_chat(model=self.model, gem=gem_id)
+                vision_response = await check_chat.send_message(vision_prompt, files=[temp_image_path])
                 scene_analysis = vision_response.text
-                
+
                 # Check for model fallback in vision response
-                user_selected_pro = "pro" in self.model.lower() if self.model else False
                 is_flash_detected = False
-                
+
                 if user_selected_pro:
                     response_lower = scene_analysis.lower()
                     # Look for MODEL: tag in response
                     if "model:" in response_lower:
-                        if "flash" in response_lower.split("model:")[1][:50]:  # Check first 50 chars after MODEL:
+                        if re.search(r'\bflash\b', response_lower.split("model:")[1][:50]):  # Check first 50 chars after MODEL:
                             is_flash_detected = True
                             if attempt == 0:
-                                print(f"[{current_label}] ⚠️ [Model Check] DETECTADO: Respuesta indica Flash (Intento 1/2). Reintentando por si es alucinación...")
+                                print(f"[{current_label}] ⚠️ [Model Check] DETECTADO: Respuesta indica Flash (Intento 1/2). Reintentando con chat nuevo...")
                                 await asyncio.sleep(2) # Wait a bit before retry
                                 continue # Retry loop
-                
-                # If we got here, either it's not Flash, or we are not checking for Pro, 
+
+                # If we got here, either it's not Flash, or we are not checking for Pro,
                 # or it's Pro and correct. Break the loop.
                 if is_flash_detected and attempt == 1:
                      # Second failure - raise exception
@@ -883,6 +882,10 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
                     )
                 else:
                     break # Success
+
+            # Create/reuse main chat session for the translation step
+            if self.chat is None:
+                self.chat = client.start_chat(model=self.model, gem=gem_id)
 
             # --- STEP 2: TRANSLATION PASS ---
             # Join ALL events to maximize context (Gemini has huge context window)

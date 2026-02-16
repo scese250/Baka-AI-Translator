@@ -1055,6 +1055,9 @@ class WebtoonBatchProcessor:
 
         logger.info(f"Starting EAGER webtoon batch processing for {total_images} images with spanning item support.")
 
+        # Dismiss loading overlay (webtoon mode doesn't pre-load inpainting models)
+        self.main_page.models_loaded.emit()
+
         # Reset and Initialize State
         self.virtual_chunk_results.clear()
         self.virtual_page_processing_count.clear()

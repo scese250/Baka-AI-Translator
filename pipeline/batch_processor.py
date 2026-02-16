@@ -218,16 +218,26 @@ class BatchProcessor:
         thread_translators = {}  # {thread_id: (Translator, src_lang, tgt_lang)}
         thread_locks = {tid: Lock() for tid in range(max_workers)} if max_workers > 1 else {}
 
-        # Pre-create inpainters per thread (avoids ONNX session creation freeze per image)
-        thread_inpainters = {}
+        # Pre-create inpainter (avoids ONNX session creation freeze per image)
+        _inp_backend = 'onnx'
+        _inp_device = resolve_device(settings_page.is_gpu_enabled(), backend=_inp_backend)
+        _inp_key = settings_page.get_tool_selection('inpainter')
+        _InpainterClass = inpaint_map[_inp_key]
+
         if max_workers > 1:
-            _inp_backend = 'onnx'
-            _inp_device = resolve_device(settings_page.is_gpu_enabled(), backend=_inp_backend)
-            _inp_key = settings_page.get_tool_selection('inpainter')
-            _InpainterClass = inpaint_map[_inp_key]
+            thread_inpainters = {}
             for tid in range(max_workers):
                 thread_inpainters[tid] = _InpainterClass(_inp_device, backend=_inp_backend)
             logger.info(f"Pre-created {max_workers} inpainter instances for parallel mode.")
+        else:
+            # Pre-create single inpainter for sequential mode
+            thread_inpainters = {}
+            self.inpainting.inpainter_cache = _InpainterClass(_inp_device, backend=_inp_backend)
+            self.inpainting.cached_inpainter_key = _inp_key
+            logger.info("Pre-created inpainter for sequential mode.")
+
+        # Signal the UI that models are loaded (dismiss loading overlay)
+        self.main_page.models_loaded.emit()
 
         # Helper for processing a single image
         def process_single_image(args):

@@ -13,6 +13,7 @@ from app.ui.dayu_widgets.qt import MPixmap
 from app.ui.main_window import ComicTranslateUI
 from app.ui.messages import Messages
 from app.ui.dayu_widgets.message import MMessage
+from app.ui.loading_overlay import LoadingOverlay
 from app.thread_worker import GenericWorker
 
 from app.ui.canvas.text_item import TextBlockItem
@@ -49,6 +50,7 @@ class ComicTranslate(ComicTranslateUI):
     image_skipped = QtCore.Signal(str, str, str)
     blk_rendered = QtCore.Signal(str, int, int, object)
     download_event = QtCore.Signal(str, str)  # status, name
+    models_loaded = QtCore.Signal()
 
     def __init__(self, parent=None):
         super(ComicTranslate, self).__init__(parent)
@@ -95,6 +97,9 @@ class ComicTranslate(ComicTranslateUI):
         self.progress_update.connect(self.update_progress)
         self.blk_rendered.connect(self.text_ctrl.on_blk_rendered)
         self.download_event.connect(self.on_download_event)
+
+        self._loading_overlay = LoadingOverlay(self)
+        self.models_loaded.connect(self._loading_overlay.hide_overlay)
 
         self.connect_ui_elements()
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
@@ -505,6 +510,7 @@ class ComicTranslate(ComicTranslateUI):
             
         self.translate_button.setEnabled(False)
         self.progress_bar.setVisible(True)
+        self._loading_overlay.show_overlay(self.tr("Loading models..."))
         
         # Choose batch processor based on webtoon mode
         if self.webtoon_mode:
@@ -564,6 +570,7 @@ class ComicTranslate(ComicTranslateUI):
             self.batch_mode_selected()
         self.translate_button.setEnabled(False)
         self.progress_bar.setVisible(True)
+        self._loading_overlay.show_overlay(self.tr("Loading models..."))
         
         # Choose batch processor based on webtoon mode
         if self.webtoon_mode:
@@ -587,6 +594,7 @@ class ComicTranslate(ComicTranslateUI):
             )
 
     def on_batch_process_finished(self):
+        self._loading_overlay.hide_overlay()
         self.progress_bar.setVisible(False)
         self.translate_button.setEnabled(True)
         self.selected_batch = []
