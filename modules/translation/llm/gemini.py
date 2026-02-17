@@ -291,38 +291,6 @@ class GeminiTranslation(BaseLLMTranslation):
 
 
 
-    async def _verify_model_version(self, chat) -> tuple[bool, str]:
-        """
-        Ask the model which version it is to detect silent fallback.
-        
-        Returns:
-            (is_expected_model, detected_version)
-        """
-        try:
-            response = await chat.send_message("¿Qué versión de Gemini eres? Responde SOLO con tu nombre de modelo, por ejemplo 'Gemini 3 Pro' o 'Gemini 3 Flash'.")
-            answer = response.text.strip().lower()
-            
-            # Detect model from response
-            detected = "unknown"
-            if re.search(r'\bpro\b', answer):
-                detected = "Pro"
-            elif re.search(r'\bflash\b', answer):
-                detected = "Flash"
-            
-            # Check if user selected Pro but got Flash
-            user_selected_pro = "pro" in self.model.lower() if self.model else False
-            
-            if user_selected_pro and detected == "Flash":
-                print(f"⚠️ [Model Check] DETECTADO CAMBIO: Usuario seleccionó Pro pero modelo respondió: {response.text.strip()}")
-                return (False, detected)
-            
-            print(f"✅ [Model Check] Modelo verificado: {detected}")
-            return (True, detected)
-            
-        except Exception as e:
-            print(f"[Model Check] Error verificando modelo: {e}")
-            return (True, "error")  # Don't block on verification errors
-
     async def _resolve_gem_id(self, client) -> str | None:
         """
         Resolve gem name to gem ID for the given client.
@@ -402,7 +370,6 @@ class GeminiTranslation(BaseLLMTranslation):
 Tu trabajo es mirar este panel y crear un resumen estructurado para ayudar a la traducción.
 
 Responde con este formato EXACTO:
-`MODEL: [Tu nombre de modelo, ej: Gemini 3 Pro o Gemini 3 Flash]`
 1. **ESCENA ACTUAL**: Descripción breve del lugar/situación.
 2. **PERSONAJES**: Identifica QUIÉN está en el panel. Describe sus rasgos si no sabes el nombre. ¿Quién está hablando o pensando?
 3. **ACCIONES**: Qué está pasando fisicamente.
@@ -421,48 +388,30 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
             gem_id = await self._resolve_gem_id(client)
 
             # Use self.chat — same chat as translations
-            is_new_chat = self.chat is None
-            if is_new_chat:
+            if self.chat is None:
                 self.chat = client.start_chat(model=self.model, gem=gem_id)
 
             print(f"[{current_label}] -> Textless Analysis: Analyzing Scene...")
             response = await self.chat.send_message(vision_prompt, files=[temp_image_path])
             analysis = response.text.strip()
 
-            # --- Model check (same logic as advanced context workflow) ---
-            if user_selected_pro:
-                response_lower = analysis.lower()
-                flash_detected = "model:" in response_lower and re.search(r'\bflash\b', response_lower.split("model:")[1][:50])
-                if flash_detected:
-                    if is_new_chat:
-                        # Fresh chat — retry once with a new chat
-                        print(f"[{current_label}] ⚠️ Flash detected in textless analysis on new chat. Retrying...")
-                        await asyncio.sleep(2)
-                        self.chat = client.start_chat(model=self.model, gem=gem_id)
-                        response = await self.chat.send_message(vision_prompt, files=[temp_image_path])
-                        analysis = response.text.strip()
-                        response_lower2 = analysis.lower()
-                        flash_detected_2 = "model:" in response_lower2 and re.search(r'\bflash\b', response_lower2.split("model:")[1][:50])
-                        if flash_detected_2:
-                            self.chat = None
-                            raise Exception(
-                                f"🛑 CAMBIO DE MODELO DETECTADO\n"
-                                f"   Seleccionaste: {self.model}\n"
-                                f"   El modelo respondió que es Flash.\n"
-                                f"   Cuenta: {current_label}\n"
-                            )
-                    else:
-                        self.chat = None
-                        raise Exception(
-                            f"🛑 CAMBIO DE MODELO DETECTADO\n"
-                            f"   Seleccionaste: {self.model}\n"
-                            f"   El modelo respondió que es Flash.\n"
-                            f"   Cuenta: {current_label}\n"
-                        )
-
-            # Strip the MODEL: line from the analysis text
-            clean_lines = [l for l in analysis.split('\n') if not l.strip().startswith('`MODEL:') and not l.strip().startswith('MODEL:')]
-            analysis = '\n'.join(clean_lines).strip()
+            # --- Model check via response.thoughts (Pro always has thoughts, Flash never does) ---
+            if user_selected_pro and response.thoughts is None:
+                # Flash detected — always retry once with a fresh chat
+                print(f"[{current_label}] ⚠️ [Textless] Flash detectado via thoughts=None (Intento 1/2). Reintentando con chat nuevo...")
+                await asyncio.sleep(2)
+                self.chat = client.start_chat(model=self.model, gem=gem_id)
+                response = await self.chat.send_message(vision_prompt, files=[temp_image_path])
+                analysis = response.text.strip()
+                if response.thoughts is None:
+                    print(f"[{current_label}] ⚠️ [Textless] Flash detectado (Intento 2/2). Confirmado.")
+                    self.chat = None
+                    raise Exception(
+                        f"🛑 CAMBIO DE MODELO DETECTADO\n"
+                        f"   Seleccionaste: {self.model}\n"
+                        f"   El modelo respondió sin thoughts (Flash).\n"
+                        f"   Cuenta: {current_label}\n"
+                    )
             
             # Update story events with this scene
             if analysis and len(analysis) > 5:
@@ -826,37 +775,37 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
 
         try:
             # Reuse existing chat session for context continuity, or create new one
-            is_flash = "flash" in self.model.lower() if self.model else False
+            user_selected_pro = "pro" in self.model.lower() if self.model else False
             if self.chat is None:
                 gem_id = await self._resolve_gem_id(client)
                 self.chat = client.start_chat(model=self.model, gem=gem_id)
-                # Verify model version on new chat creation (skip for Flash — no fallback to detect)
-                if not is_flash:
-                    is_expected, detected = await self._verify_model_version(self.chat)
-                    if not is_expected:
-                        raise Exception(
-                            f"🛑 CAMBIO DE MODELO DETECTADO\n"
-                            f"   Seleccionaste: {self.model}\n"
-                            f"   Modelo real: Gemini 3 {detected}\n"
-                            f"   Opciones: Esperar 1 hora o cambiar a Flash manualmente."
-                        )
-            else:
-                # Standard mode: verify on every translation (skip for Flash)
-                if not is_flash:
-                    is_expected, detected = await self._verify_model_version(self.chat)
-                    if not is_expected:
-                        raise Exception(
-                            f"🛑 CAMBIO DE MODELO DETECTADO\n"
-                            f"   Seleccionaste: {self.model}\n"
-                            f"   Modelo real: Gemini 3 {detected}\n"
-                            f"   Opciones: Esperar 1 hora o cambiar a Flash manualmente."
-                        )
             
             if files_to_upload:
                 response = await self.chat.send_message(full_prompt, files=files_to_upload)
             else:
                 response = await self.chat.send_message(full_prompt)
             
+            # [MODEL CHECK] Detect Pro→Flash fallback via response.thoughts
+            # Pro always populates thoughts, Flash never does
+            if user_selected_pro and response.thoughts is None:
+                print(f"⚠️ [Standard] Flash detectado via thoughts=None. Reintentando con chat nuevo...")
+                await asyncio.sleep(2)
+                gem_id = await self._resolve_gem_id(client)
+                self.chat = client.start_chat(model=self.model, gem=gem_id)
+                if files_to_upload:
+                    response = await self.chat.send_message(full_prompt, files=files_to_upload)
+                else:
+                    response = await self.chat.send_message(full_prompt)
+                if response.thoughts is None:
+                    print(f"⚠️ [Standard] Flash confirmado tras retry.")
+                    self.chat = None
+                    raise Exception(
+                        f"🛑 CAMBIO DE MODELO DETECTADO\n"
+                        f"   Seleccionaste: {self.model}\n"
+                        f"   El modelo respondió sin thoughts (Flash).\n"
+                        f"   Opciones: Esperar 1 hora o cambiar a Flash manualmente."
+                    )
+
             self.chat_metadata = self.chat.metadata # Update context
             return response.text
         finally:
@@ -889,7 +838,6 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
 Tu trabajo es mirar este panel y crear un resumen estructurado para ayudar a la traducción.
 
 Responde con este formato EXACTO:
-`MODEL: [Tu nombre de modelo, ej: Gemini 3 Pro o Gemini 3 Flash]`
 1. **ESCENA ACTUAL**: Descripción breve del lugar/situación.
 2. **PERSONAJES**: Identifica QUIÉN está en el panel. Describe sus rasgos si no sabes el nombre. ¿Quién está hablando o pensando?
 3. **ACCIONES**: Qué está pasando fisicamente.
@@ -903,49 +851,32 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
             user_selected_pro = "pro" in self.model.lower() if self.model else False
             gem_id = await self._resolve_gem_id(client)
 
-            # Create chat if needed — track whether this is a fresh chat for retry logic
-            is_new_chat = self.chat is None
-            if is_new_chat:
+            # Create chat if needed
+            if self.chat is None:
                 self.chat = client.start_chat(model=self.model, gem=gem_id)
 
             # Send vision prompt in self.chat (same chat used for translation)
             vision_response = await self.chat.send_message(vision_prompt, files=[temp_image_path])
             scene_analysis = vision_response.text
 
-            # [MODEL CHECK] Detect Pro→Flash fallback via MODEL: tag in response
-            if user_selected_pro:
-                response_lower = scene_analysis.lower()
-                if "model:" in response_lower:
-                    if re.search(r'\bflash\b', response_lower.split("model:")[1][:50]):
-                        if is_new_chat:
-                            # Fresh chat — retry once with a new chat (could be hallucination)
-                            print(f"[{current_label}] ⚠️ [Model Check] DETECTADO: Respuesta indica Flash (Intento 1/2). Reintentando con chat nuevo...")
-                            await asyncio.sleep(2)
-                            self.chat = client.start_chat(model=self.model, gem=gem_id)
-                            vision_response = await self.chat.send_message(vision_prompt, files=[temp_image_path])
-                            scene_analysis = vision_response.text
-                            # Check again
-                            response_lower2 = scene_analysis.lower()
-                            if "model:" in response_lower2 and re.search(r'\bflash\b', response_lower2.split("model:")[1][:50]):
-                                print(f"[{current_label}] ⚠️ [Model Check] DETECTADO: Respuesta indica Flash (Intento 2/2). Confirmado.")
-                                self.chat = None
-                                raise Exception(
-                                    f"🛑 CAMBIO DE MODELO DETECTADO\n"
-                                    f"   Seleccionaste: {self.model}\n"
-                                    f"   El modelo respondió que es Flash.\n"
-                                    f"   Esto indica que tu cuota de Pro se agotó.\n"
-                                    f"   Opciones: Esperar 1 hora o cambiar a Flash manualmente."
-                                )
-                        else:
-                            # Existing chat — account fell back mid-session, no retry
-                            self.chat = None
-                            raise Exception(
-                                f"🛑 CAMBIO DE MODELO DETECTADO\n"
-                                f"   Seleccionaste: {self.model}\n"
-                                f"   El modelo respondió que es Flash.\n"
-                                f"   Esto indica que tu cuota de Pro se agotó.\n"
-                                f"   Opciones: Esperar 1 hora o cambiar a Flash manualmente."
-                            )
+            # [MODEL CHECK - VISION] Detect Pro→Flash fallback via response.thoughts
+            if user_selected_pro and vision_response.thoughts is None:
+                # Flash detected — always retry once with a fresh chat
+                print(f"[{current_label}] ⚠️ [Vision] Flash detectado via thoughts=None (Intento 1/2). Reintentando con chat nuevo...")
+                await asyncio.sleep(2)
+                self.chat = client.start_chat(model=self.model, gem=gem_id)
+                vision_response = await self.chat.send_message(vision_prompt, files=[temp_image_path])
+                scene_analysis = vision_response.text
+                if vision_response.thoughts is None:
+                    print(f"[{current_label}] ⚠️ [Vision] Flash detectado (Intento 2/2). Confirmado.")
+                    self.chat = None
+                    raise Exception(
+                        f"🛑 CAMBIO DE MODELO DETECTADO\n"
+                        f"   Seleccionaste: {self.model}\n"
+                        f"   El modelo respondió sin thoughts (Flash).\n"
+                        f"   Esto indica que tu cuota de Pro se agotó.\n"
+                        f"   Opciones: Esperar 1 hora o cambiar a Flash manualmente."
+                    )
 
             # --- STEP 2: TRANSLATION PASS (same self.chat) ---
             # Join ALL events to maximize context (Gemini has huge context window)
@@ -977,6 +908,27 @@ Ejemplo: [Traducción] ||UPDATE|| Narutu descubre que el enemigo es su hermano.
             # Re-send image to ensure clear visibility for OCR correction/Text-Image alignment
             trans_response = await self.chat.send_message(enriched_prompt, files=[temp_image_path])
             raw_text = trans_response.text
+
+            # [MODEL CHECK - TRANSLATION] Detect Pro→Flash fallback via response.thoughts
+            if user_selected_pro and trans_response.thoughts is None:
+                print(f"[{current_label}] ⚠️ [Translation] Flash detectado via thoughts=None. Reintentando con chat nuevo...")
+                await asyncio.sleep(2)
+                self.chat = client.start_chat(model=self.model, gem=gem_id)
+                # Retry full translation (vision + translate) in new chat
+                vision_response = await self.chat.send_message(vision_prompt, files=[temp_image_path])
+                scene_analysis_retry = vision_response.text
+                trans_response = await self.chat.send_message(enriched_prompt, files=[temp_image_path])
+                raw_text = trans_response.text
+                if trans_response.thoughts is None:
+                    print(f"[{current_label}] ⚠️ [Translation] Flash confirmado tras retry.")
+                    self.chat = None
+                    raise Exception(
+                        f"🛑 CAMBIO DE MODELO DETECTADO\n"
+                        f"   Seleccionaste: {self.model}\n"
+                        f"   El modelo respondió sin thoughts (Flash).\n"
+                        f"   Esto indica que tu cuota de Pro se agotó.\n"
+                        f"   Opciones: Esperar 1 hora o cambiar a Flash manualmente."
+                    )
             
             # --- STEP 3: UPDATE MEMORY ---
             final_translation = raw_text
