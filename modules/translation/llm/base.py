@@ -73,14 +73,14 @@ class BaseLLMTranslation(LLMTranslation):
 
         user_prompt = f"{extra_context}\nMake the translation sound as natural as possible.\nTranslate this:\n{entire_raw_text}"
         
-        # Sistema de reintentos: 3 intentos con imagen, 1 intento final sin imagen
-        max_retries = 4
+        # Retry: 1 intento con imagen, 1 intento sin imagen
+        max_retries = 2
         last_error = None
         
         for attempt in range(max_retries):
             try:
-                # En el cuarto intento (índice 3), intentar sin imagen
-                if attempt == 3:
+                # En el segundo intento (índice 1), intentar sin imagen
+                if attempt == 1:
                     print(f"Translation attempt {attempt + 1}: Attempting without image")
                     entire_translated_text = self._perform_translation(user_prompt, system_prompt, None)
                 else:

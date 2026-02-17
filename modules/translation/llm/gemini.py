@@ -580,13 +580,14 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
              self.chat = None
              raise Exception(f"Gemini Timeout: The request took longer than {request_timeout}s. Connection reset for next retry.")
         except Exception as e:
-            # Clear stale client/chat so the next retry starts fresh
-            self.client = None
-            self.chat = None
             error_msg = str(e)
             if not error_msg: 
                 error_msg = f"Unknown Error ({type(e).__name__})"
-            if "CAMBIO DE MODELO" in error_msg: raise  # Fatal: propagate as-is
+            if "CAMBIO DE MODELO" in error_msg:
+                self.client = None
+                self.chat = None
+                raise  # Fatal: propagate as-is
+            # Keep client/chat alive for retry in same chat (e.g. retry without image)
             if "429" in error_msg: raise Exception(f"Gemini Rate Limit: {error_msg}")
             raise Exception(f"Gemini Error: {error_msg}")
 
