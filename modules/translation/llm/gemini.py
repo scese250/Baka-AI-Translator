@@ -622,6 +622,10 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
         Translation flow for unassigned mode (sequential / single-thread).
         Uses round-robin across all candidates.
         """
+        # Reset failed accounts so a new batch doesn't skip them from previous runs
+        if self._auth_initialized:
+            self._auth_switcher.reset()
+
         # 0. Try reusing existing client first to avoid login-spam
         reuse_modelo_fallback_idx = None  # Track account tested in reuse path
         if self.client:
