@@ -100,9 +100,9 @@ class BaseLLMTranslation(LLMTranslation):
                 # Log del reintento
                 print(f"Translation attempt {attempt + 1} failed: {error_msg}")
 
-                # Check for fatal errors that shouldn't trigger a retry (Gemini Web Auth failure)
-                if "accounts failed" in error_msg and "Gemini Web Error" in error_msg:
-                    print("Fatal authentication error detected (all accounts invalid). Stopping retries.")
+                # Check for fatal errors that shouldn't trigger a retry
+                if ("accounts failed" in error_msg and "Gemini Web Error" in error_msg) or "CAMBIO DE MODELO" in error_msg:
+                    print("Fatal error detected. Stopping retries.")
                     raise
 
                 print(f"Retrying... (attempt {attempt + 2}/{max_retries})")
