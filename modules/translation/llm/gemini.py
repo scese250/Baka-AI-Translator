@@ -1,5 +1,6 @@
 import browser_cookie3
 from gemini_webapi import GeminiClient
+from gemini_webapi.exceptions import TimeoutError as GeminiTimeoutError
 from typing import Any
 import numpy as np
 import time
@@ -578,44 +579,50 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
                     raise Exception(f"[{label}] Failed to initialize assigned account.")
 
         # 2. Try translation with the assigned client
-        try:
-            if use_advanced_workflow:
-                return await self._run_advanced_context_workflow(self.client, user_prompt, system_prompt, image)
-            else:
-                return await self._run_standard_translation(self.client, user_prompt, system_prompt, image)
-        except Exception as e:
-            err_str = str(e)
-            if "CAMBIO DE MODELO" in err_str:
-                raise  # Propagate model fallback as-is
+        #    GeminiTimeoutError → retry same client (outer asyncio.wait_for enforces total limit)
+        while True:
+            try:
+                if use_advanced_workflow:
+                    return await self._run_advanced_context_workflow(self.client, user_prompt, system_prompt, image)
+                else:
+                    return await self._run_standard_translation(self.client, user_prompt, system_prompt, image)
+            except GeminiTimeoutError:
+                print(f"[{label}] Library timeout, retrying same account...")
+                self.chat = None
+                continue
+            except Exception as e:
+                err_str = str(e)
+                if "CAMBIO DE MODELO" in err_str:
+                    raise  # Propagate model fallback as-is
 
-            print(f"[{label}] Translation failed: {err_str}. Retrying with fresh client...")
-            self.client = None
-            self.chat = None
+                print(f"[{label}] Translation failed: {err_str}. Retrying with fresh client...")
+                self.client = None
+                self.chat = None
 
-            # 3. One retry: recreate client from same credentials
-            #    If cookies expired, try refresh first
-            if ('expired' in err_str.lower() or 'login' in err_str.lower()) and creds.get('source') == 'auth_file':
-                auth_idx = creds.get('auth_index')
-                if auth_idx is not None:
-                    refreshed = self._try_refresh_cookies(auth_idx)
-                    if refreshed:
-                        new_creds = self._browser_manager.get_cookies_from_auth(auth_idx)
-                        if new_creds:
-                            self._assigned_credentials = {
-                                **creds,
-                                'psid': new_creds['psid'],
-                                'psidts': new_creds['psidts'],
-                            }
-                            creds = self._assigned_credentials
+                # 3. One retry: recreate client from same credentials
+                #    If cookies expired, try refresh first
+                if ('expired' in err_str.lower() or 'login' in err_str.lower()) and creds.get('source') == 'auth_file':
+                    auth_idx = creds.get('auth_index')
+                    if auth_idx is not None:
+                        refreshed = self._try_refresh_cookies(auth_idx)
+                        if refreshed:
+                            new_creds = self._browser_manager.get_cookies_from_auth(auth_idx)
+                            if new_creds:
+                                self._assigned_credentials = {
+                                    **creds,
+                                    'psid': new_creds['psid'],
+                                    'psidts': new_creds['psidts'],
+                                }
+                                creds = self._assigned_credentials
 
-            self.client = GeminiClient(creds['psid'], creds['psidts'] or None)
-            await self.client.init(timeout=30, auto_close=False, auto_refresh=False)
-            print(f"[{label}] Retry with fresh client...")
+                self.client = GeminiClient(creds['psid'], creds['psidts'] or None)
+                await self.client.init(timeout=30, auto_close=False, auto_refresh=False)
+                print(f"[{label}] Retry with fresh client...")
 
-            if use_advanced_workflow:
-                return await self._run_advanced_context_workflow(self.client, user_prompt, system_prompt, image)
-            else:
-                return await self._run_standard_translation(self.client, user_prompt, system_prompt, image)
+                if use_advanced_workflow:
+                    return await self._run_advanced_context_workflow(self.client, user_prompt, system_prompt, image)
+                else:
+                    return await self._run_standard_translation(self.client, user_prompt, system_prompt, image)
 
     async def _run_unassigned_mode(self, use_advanced_workflow, user_prompt, system_prompt, image):
         """
@@ -629,38 +636,44 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
         # 0. Try reusing existing client first to avoid login-spam
         reuse_modelo_fallback_idx = None  # Track account tested in reuse path
         if self.client:
-            try:
-                if use_advanced_workflow:
-                    return await self._run_advanced_context_workflow(self.client, user_prompt, system_prompt, image)
-                else:
-                    return await self._run_standard_translation(self.client, user_prompt, system_prompt, image)
-            except Exception as e:
-                err_str = str(e)
-                # Model fallback - mark this account to skip in round-robin
-                if "CAMBIO DE MODELO" in err_str:
-                    reuse_modelo_fallback_idx = self.current_candidate_index
-                    print(f"[Gemini] Model fallback detected on current account. Rotating to next...")
-                elif "expired" in err_str.lower() or "login" in err_str.lower():
-                    # Try auto-refresh if auth file based
-                    current_candidate = self.candidates[self.current_candidate_index] if self.current_candidate_index < len(self.candidates) else None
-                    if current_candidate and current_candidate.get('source') == 'auth_file':
-                        auth_idx = current_candidate.get('auth_index')
-                        if auth_idx is not None:
-                            refreshed = self._try_refresh_cookies(auth_idx)
-                            if refreshed:
-                                # Retry with refreshed cookies
-                                creds = self._browser_manager.get_cookies_from_auth(auth_idx)
-                                if creds:
-                                    self.client = self._build_client_from_cookies(creds)
-                                    if use_advanced_workflow:
-                                        return await self._run_advanced_context_workflow(self.client, user_prompt, system_prompt, image)
-                                    else:
-                                        return await self._run_standard_translation(self.client, user_prompt, system_prompt, image)
-                    print(f"[Gemini] Active session expired/failed ({err_str}). Negotiating new connection...")
-                else:
-                    print(f"[Gemini] Active session expired/failed ({err_str}). Negotiating new connection...")
-                self.client = None
-                self.chat = None  # Reset chat to create new one with new client
+            while True:  # Retry loop for timeouts (outer asyncio.wait_for enforces total limit)
+                try:
+                    if use_advanced_workflow:
+                        return await self._run_advanced_context_workflow(self.client, user_prompt, system_prompt, image)
+                    else:
+                        return await self._run_standard_translation(self.client, user_prompt, system_prompt, image)
+                except GeminiTimeoutError:
+                    print(f"[Gemini] Library timeout, retrying same account...")
+                    self.chat = None
+                    continue
+                except Exception as e:
+                    err_str = str(e)
+                    # Model fallback - mark this account to skip in round-robin
+                    if "CAMBIO DE MODELO" in err_str:
+                        reuse_modelo_fallback_idx = self.current_candidate_index
+                        print(f"[Gemini] Model fallback detected on current account. Rotating to next...")
+                    elif "expired" in err_str.lower() or "login" in err_str.lower():
+                        # Try auto-refresh if auth file based
+                        current_candidate = self.candidates[self.current_candidate_index] if self.current_candidate_index < len(self.candidates) else None
+                        if current_candidate and current_candidate.get('source') == 'auth_file':
+                            auth_idx = current_candidate.get('auth_index')
+                            if auth_idx is not None:
+                                refreshed = self._try_refresh_cookies(auth_idx)
+                                if refreshed:
+                                    # Retry with refreshed cookies
+                                    creds = self._browser_manager.get_cookies_from_auth(auth_idx)
+                                    if creds:
+                                        self.client = self._build_client_from_cookies(creds)
+                                        if use_advanced_workflow:
+                                            return await self._run_advanced_context_workflow(self.client, user_prompt, system_prompt, image)
+                                        else:
+                                            return await self._run_standard_translation(self.client, user_prompt, system_prompt, image)
+                        print(f"[Gemini] Active session expired/failed ({err_str}). Negotiating new connection...")
+                    else:
+                        print(f"[Gemini] Active session expired/failed ({err_str}). Negotiating new connection...")
+                    self.client = None
+                    self.chat = None  # Reset chat to create new one with new client
+                    break  # Exit retry loop, fall through to round-robin
 
         # Retry Logic (Round Robin)
         num_candidates = len(self.candidates)
@@ -695,13 +708,20 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
                 # [FIX] Update index BEFORE attempt so logs show correct account
                 self.current_candidate_index = attempt_idx
                 
-                # --- WORKFLOW SELECTOR ---
-                if use_advanced_workflow:
-                    print(f"[{label}] Starting Advanced Context Workflow (Vision + Translation)...")
-                    final_text = await self._run_advanced_context_workflow(temp_client, user_prompt, system_prompt, image)
-                else:
-                    print(f"[{label}] Starting Standard Translation...")
-                    final_text = await self._run_standard_translation(temp_client, user_prompt, system_prompt, image)
+                # --- WORKFLOW SELECTOR (with timeout retry) ---
+                while True:  # Retry loop for timeouts (outer asyncio.wait_for enforces total limit)
+                    try:
+                        if use_advanced_workflow:
+                            print(f"[{label}] Starting Advanced Context Workflow (Vision + Translation)...")
+                            final_text = await self._run_advanced_context_workflow(temp_client, user_prompt, system_prompt, image)
+                        else:
+                            print(f"[{label}] Starting Standard Translation...")
+                            final_text = await self._run_standard_translation(temp_client, user_prompt, system_prompt, image)
+                        break  # Success → exit retry loop
+                    except GeminiTimeoutError:
+                        print(f"[{label}] Library timeout, retrying same account...")
+                        self.chat = None
+                        continue
 
                 # If successful:
                 self.client = temp_client
@@ -732,7 +752,7 @@ Mantén el resumen CONCISO. Máximo 100 palabras. Responde SOLO con el resumen."
 
                 errors.append(f"{label}: {err_str}")
 
-                # Record failure for auth switcher
+                # Record failure for auth switcher (NOT for timeouts — those are retried above)
                 if self._auth_initialized and candidate.get('source') == 'auth_file':
                     auth_idx = candidate.get('auth_index')
                     if auth_idx is not None:
