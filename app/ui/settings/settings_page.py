@@ -6,6 +6,7 @@ from PySide6.QtCore import Signal, QTimer
 from PySide6.QtGui import QFont, QFontDatabase
 
 from .settings_ui import SettingsPageUI
+from app.profile_manager import ProfileManager
 
 # Dictionary to map old model names to the newest versions in settings
 OCR_MIGRATIONS = {
@@ -53,6 +54,7 @@ class SettingsPage(QtWidgets.QWidget):
 
         self.ui = SettingsPageUI(self)
         self._loading_settings = True
+        self._profile_manager = ProfileManager()
 
         # Debounced auto-save timer (500ms)
         self._save_timer = QTimer(self)
@@ -75,6 +77,13 @@ class SettingsPage(QtWidgets.QWidget):
         self.ui.theme_combo.currentTextChanged.connect(self.on_theme_changed)
         self.ui.lang_combo.currentTextChanged.connect(self.on_language_changed)
         self.ui.font_browser.sig_files_changed.connect(self.import_font)
+
+        # Profile signals
+        pp = self.ui.personalization_page
+        pp.profile_save_requested.connect(self._on_profile_save)
+        pp.profile_switch_requested.connect(self._on_profile_switch)
+        pp.profile_delete_requested.connect(self._on_profile_delete)
+        pp.profile_rename_requested.connect(self._on_profile_rename)
 
         # Auto-save: connect all child widgets to debounced save
         for widget in self.ui.findChildren(QtWidgets.QWidget):
@@ -333,10 +342,73 @@ class SettingsPage(QtWidgets.QWidget):
 
         settings.sync()
 
+    # ------------------------------------------------------------------
+    # Profile management
+    # ------------------------------------------------------------------
+
+    def _refresh_profile_combo(self, active: str = ""):
+        """Repopulate the profile combo from disk."""
+        profiles = self._profile_manager.list_profiles()
+        self.ui.personalization_page.refresh_profiles(profiles, active)
+
+    def _on_profile_save(self, name: str):
+        """Save the current settings as a named profile."""
+        # Flush current UI state to AppSettings first
+        self.save_settings()
+        from app.settings_manager import AppSettings
+        settings = AppSettings.instance()
+        # Save all flat keys from AppSettings (ProfileManager strips excluded ones)
+        self._profile_manager.save_profile(name, dict(settings._data))
+        settings.setValue('active_profile', name)
+        settings.sync()
+        self._refresh_profile_combo(name)
+
+    def _on_profile_switch(self, name: str):
+        """Load a profile and refresh the UI."""
+        if not self._profile_manager.profile_exists(name):
+            return
+        from app.settings_manager import AppSettings
+        settings = AppSettings.instance()
+        profile_data = self._profile_manager.load_profile(name)
+        # Write profile keys into AppSettings, preserving excluded keys
+        for key, value in profile_data.items():
+            settings._data[key] = value
+        settings.setValue('active_profile', name)
+        settings.sync()
+        self.load_settings()
+
+    def _on_profile_delete(self, name: str):
+        """Delete a profile and refresh the combo."""
+        self._profile_manager.delete_profile(name)
+        from app.settings_manager import AppSettings
+        settings = AppSettings.instance()
+        if settings.value('active_profile', '') == name:
+            settings.setValue('active_profile', '')
+            settings.sync()
+        self._refresh_profile_combo(settings.value('active_profile', ''))
+
+    def _on_profile_rename(self, old_name: str, new_name: str):
+        """Rename a profile and refresh the combo."""
+        if self._profile_manager.profile_exists(new_name):
+            QtWidgets.QMessageBox.warning(
+                self, self.tr("Rename Profile"),
+                self.tr("A profile named \"%s\" already exists.") % new_name)
+            return
+        self._profile_manager.rename_profile(old_name, new_name)
+        from app.settings_manager import AppSettings
+        settings = AppSettings.instance()
+        if settings.value('active_profile', '') == old_name:
+            settings.setValue('active_profile', new_name)
+            settings.sync()
+        self._refresh_profile_combo(new_name)
+
     def load_settings(self):
         self._loading_settings = True
         from app.settings_manager import AppSettings
         settings = AppSettings.instance()
+
+        # Refresh profile combo
+        self._refresh_profile_combo(settings.value('active_profile', ''))
 
         # Load language
         language = settings.value('language', 'English')

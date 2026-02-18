@@ -215,6 +215,7 @@ class SettingsPageUI(QtWidgets.QWidget):
         self.threads_combo = self.personalization_page.threads_combo
         self.source_lang_combo = self.personalization_page.source_lang_combo
         self.target_lang_combo = self.personalization_page.target_lang_combo
+        self.profile_combo = self.personalization_page.profile_combo
 
         # Tools
         self.translator_combo = self.tools_page.translator_combo

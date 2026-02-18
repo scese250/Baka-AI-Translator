@@ -4,6 +4,7 @@ log.txt
 clearlog.txt
 context_sessions/
 configs/auth/
+configs/profiles/
 
 # Project config (local only)
 pyproject.toml
