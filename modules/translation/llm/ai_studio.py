@@ -52,7 +52,12 @@ class AIStudioTranslation(BaseLLMTranslation):
         model_name = "gemini-2.5-flash-lite"  # Default
         
         # Map UI keys to valid AIStudioToAPI model names
-        if "AIStudio-3-Pro" in translator_key:
+        # Note: More specific keys (3.1) must be checked before less specific (3-)
+        if "AIStudio-3.1-Pro" in translator_key:
+            model_name = "gemini-3.1-pro-preview"
+        elif "AIStudio-3.1-Flash-Lite" in translator_key:
+            model_name = "gemini-3.1-flash-lite-preview"
+        elif "AIStudio-3-Pro" in translator_key:
             model_name = "gemini-3-pro-preview"
         elif "AIStudio-3-Flash" in translator_key:
             model_name = "gemini-3-flash-preview"
