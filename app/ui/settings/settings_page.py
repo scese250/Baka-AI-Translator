@@ -129,6 +129,9 @@ class SettingsPage(QtWidgets.QWidget):
     def is_gpu_enabled(self):
         return self.ui.use_gpu_checkbox.isChecked()
 
+    def is_translate_first_enabled(self):
+        return self.ui.translate_first_checkbox.isChecked()
+
     def get_llm_settings(self):
         return {
             'extra_context': self.ui.extra_context.toPlainText(),
@@ -229,6 +232,7 @@ class SettingsPage(QtWidgets.QWidget):
                 'inpainter': self.get_tool_selection('inpainter'),
                 'mask_dilation': self.get_mask_dilation(),
                 'use_gpu': self.is_gpu_enabled(),
+                'translate_first': self.is_translate_first_enabled(),
                 'hd_strategy': self.get_hd_strategy_settings()
             },
             'llm': self.get_llm_settings(),
@@ -453,6 +457,7 @@ class SettingsPage(QtWidgets.QWidget):
         self.ui.detector_combo.setCurrentText(translated_detector)
 
         self.ui.use_gpu_checkbox.setChecked(settings.value('use_gpu', False, type=bool))
+        self.ui.translate_first_checkbox.setChecked(settings.value('translate_first', False, type=bool))
         self.ui.dilation_spinbox.setValue(settings.value('mask_dilation', 5, type=int))
 
         # Load HD strategy settings

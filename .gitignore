@@ -31,3 +31,6 @@ Thumbs.db
 
 # Gemini agent
 .gemini/
+
+# Colab notebook port
+Colab/

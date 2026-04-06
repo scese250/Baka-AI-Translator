@@ -159,6 +159,14 @@ class BatchProcessor:
         total_images = len(image_list)
         
         settings_page = self.main_page.settings_page
+
+        # Check if "Translate First" mode is enabled
+        if settings_page.is_translate_first_enabled():
+            logger.info("Translate First mode enabled — using two-phase pipeline")
+            return self._batch_process_translate_first(
+                image_list, total_images, timestamp, render_settings
+            )
+
         max_workers = settings_page.get_all_settings().get('batch_threads', 1)
 
         # Read image export format settings
@@ -199,14 +207,6 @@ class BatchProcessor:
         def update_global_progress():
             with self._progress_lock:
                 self._completed_images += 1
-                # We can't easily map per-step progress to the single bar when parallel.
-                # Standard practice: The unified progress bar tracks 'Completed Images'.
-                # But existing emit_progress tracks 'Steps' within an image.
-                # If we run parallel, the main bar will jump around if we confuse it with multiple images' steps.
-                # Actually, the UI usually expects sequential updates for the 'Current' image or 'Total' progress.
-                # Let's trust emit_progress to handle 'index' correctly, allowing the UI to show progress for specific items if it supports it, 
-                # or just accept it might be jumpy. 
-                # The 'progress_update' signal signature is (index, total, step, steps, change_name).
                 pass
 
         # Persistent translator state for sequential processing (reuse between images)
@@ -823,5 +823,540 @@ class BatchProcessor:
                         output_dir=final_output_dir, output_base_name=output_base_name)
                      if os.path.exists(input_dir_for_packing):
                          shutil.rmtree(input_dir_for_packing)
-                         
 
+    def _batch_process_translate_first(self, image_list, total_images, timestamp, render_settings):
+        """
+        Two-phase batch processing: translate ALL images first, then inpaint/render ALL.
+        
+        Phase 1 — Extract & Translate (lightweight):
+            Text Detection → OCR → Translation for every image.
+            Results are cached in memory.
+        
+        Phase 2 — Inpaint & Render (heavyweight):
+            Inpainting → Text Rendering → Save for every image,
+            reading translations from the Phase 1 cache.
+        """
+        settings_page = self.main_page.settings_page
+
+        # Read image export format settings
+        _export_settings = settings_page.get_export_settings()
+        _image_format = _export_settings.get('image_format', 'PNG').lower()
+        _image_ext = f'.{_image_format}'
+        _image_quality = _export_settings.get('image_quality', 100)
+
+        # In-memory cache: {image_path -> dict with blk_list, langs, image, etc.}
+        deferred_cache = {}
+
+        # Persistent translator (reuse between images for chat context)
+        local_translator = None
+        last_src = None
+        last_tgt = None
+
+        # Use total_steps=10 for both phases combined
+        # Phase 1 steps: 0 (start), 1 (detection), 2 (OCR), 7 (translation) = steps 0-7
+        # Phase 2 steps: 3 (pre-inpaint), 4 (mask), 5 (inpaint), 9 (render), 10 (save) = steps 3-10
+
+        # Signal the UI that models are loaded (dismiss loading overlay)
+        self.main_page.models_loaded.emit()
+
+        # ══════════════════════════════════════════════════════════════════
+        # PHASE 1 — Extract & Translate all images
+        # ══════════════════════════════════════════════════════════════════
+        logger.info("═══ PHASE 1: Extract & Translate ═══")
+
+        for index, image_path in enumerate(image_list):
+            if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+                return
+
+            _fname = os.path.basename(image_path)
+            self.emit_progress(index, total_images, 0, 10, True, _fname)
+
+            source_lang = self.main_page.image_states[image_path]['source_lang']
+            target_lang = self.main_page.image_states[image_path]['target_lang']
+            target_lang_en = self.main_page.lang_mapping.get(target_lang, None)
+            trg_lng_cd = get_language_code(target_lang_en)
+
+            base_name = os.path.splitext(os.path.basename(image_path))[0].strip()
+            extension = _image_ext
+            directory = os.path.dirname(image_path)
+
+            # Resolve archive base name
+            archive_bname = ""
+            if self.main_page.project_file and self.main_page.temp_dir in os.path.abspath(image_path):
+                directory = os.path.dirname(self.main_page.project_file)
+                img_state = self.main_page.image_states.get(image_path, {})
+                original_path = img_state.get('original_path', '')
+                if original_path:
+                    archive_bname = os.path.splitext(os.path.basename(os.path.dirname(original_path)))[0].strip()
+                else:
+                    archive_bname = os.path.splitext(os.path.basename(self.main_page.project_file))[0].strip()
+
+            if not archive_bname:
+                for archive in self.main_page.file_handler.archive_info:
+                    images = archive['extracted_images']
+                    archive_path = archive['archive_path']
+                    for img_pth in images:
+                        if img_pth == image_path:
+                            directory = os.path.dirname(archive_path)
+                            archive_bname = os.path.splitext(os.path.basename(archive_path))[0].strip()
+
+            image = imk.read_image(image_path)
+
+            # Check skip flag
+            state = self.main_page.image_states.get(image_path, {})
+            if state.get('skip', False):
+                # Cache as skip so Phase 2 knows to just copy the original
+                deferred_cache[image_path] = {
+                    'skip': True, 'image': image, 'base_name': base_name,
+                    'extension': extension, 'directory': directory,
+                    'archive_bname': archive_bname,
+                }
+                logger.info(f"[Phase 1] Image skipped by user: {base_name}{extension}")
+                continue
+
+            # ─── Text Block Detection ───
+            self.emit_progress(index, total_images, 1, 10, False, _fname)
+            if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+                return
+
+            if self.block_detection.block_detector_cache is None:
+                self.block_detection.block_detector_cache = TextBlockDetector(settings_page)
+            t0 = time.time()
+            blk_list = self.block_detection.block_detector_cache.detect(image)
+            t1 = time.time()
+            logger.info("\033[92m[Phase 1] Text detection took %.2fs\033[0m", t1 - t0)
+
+            # ─── OCR ───
+            self.emit_progress(index, total_images, 2, 10, False, _fname)
+            if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+                return
+
+            if not blk_list:
+                # No text blocks — cache for Phase 2 to just copy original
+                deferred_cache[image_path] = {
+                    'skip': False, 'no_blocks': True, 'image': image,
+                    'base_name': base_name, 'extension': extension,
+                    'directory': directory, 'archive_bname': archive_bname,
+                    'source_lang': source_lang, 'target_lang': target_lang,
+                }
+                logger.info(f"[Phase 1] No text blocks in {base_name}, will copy original in Phase 2")
+                continue
+
+            try:
+                t0 = time.time()
+                self.ocr_handler.ocr.initialize(self.main_page, source_lang)
+                self.ocr_handler.ocr.process(image, blk_list)
+                t1 = time.time()
+                logger.info("\033[92m[Phase 1] OCR processing took %.2fs\033[0m", t1 - t0)
+
+                source_lang_english = self.main_page.lang_mapping.get(source_lang, source_lang)
+                rtl = True if source_lang_english == 'Japanese' else False
+                blk_list = sort_blk_list(blk_list, rtl)
+
+            except Exception as e:
+                if isinstance(e, requests.exceptions.HTTPError):
+                    try:
+                        err_json = e.response.json()
+                        err_msg = err_json.get("error_description", str(e))
+                    except Exception:
+                        err_msg = str(e)
+                else:
+                    err_msg = str(e)
+
+                logger.exception(f"[Phase 1] OCR processing failed: {err_msg}")
+                self.main_page.image_skipped.emit(image_path, "OCR", err_msg)
+                continue
+
+            # ─── Translation ───
+            self.emit_progress(index, total_images, 7, 10, False, _fname)
+            if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+                return
+
+            llm_s = settings_page.get_llm_settings()
+            extra_context = llm_s['extra_context'] if llm_s.get('extra_context_enabled', True) else ''
+            translator_key = settings_page.get_tool_selection('translator')
+
+            # Reuse translator for chat context coherence
+            if local_translator is None or source_lang != last_src or target_lang != last_tgt:
+                local_translator = Translator(self.main_page, source_lang, target_lang)
+                last_src = source_lang
+                last_tgt = target_lang
+
+            try:
+                t0 = time.time()
+                local_translator.translate(blk_list, image, extra_context, extension)
+                t1 = time.time()
+                logger.info("\033[92m[Phase 1] Translation took %.2fs [%s]\033[0m", t1 - t0, f"{base_name}{extension}")
+            except Exception as e:
+                if isinstance(e, requests.exceptions.HTTPError):
+                    try:
+                        err_json = e.response.json()
+                        err_msg = err_json.get("error_description", str(e))
+                    except Exception:
+                        err_msg = str(e)
+                else:
+                    err_msg = str(e)
+
+                logger.exception(f"[Phase 1] Translation failed [{base_name}{extension}]: {err_msg}")
+                self.main_page.image_skipped.emit(image_path, "Translator", err_msg)
+
+                if ("accounts failed" in err_msg and "Gemini Web Error" in err_msg) or "CAMBIO DE MODELO" in err_msg:
+                    # Fatal error — stop batch completely
+                    self.main_page.current_worker.cancel()
+                    return
+                continue
+
+            # Validate translation
+            entire_raw_text = get_raw_text(blk_list)
+            entire_translated_text = get_raw_translation(blk_list)
+            try:
+                raw_text_obj = json.loads(entire_raw_text)
+                translated_text_obj = json.loads(entire_translated_text)
+                if (not raw_text_obj) or (not translated_text_obj):
+                    self.main_page.image_skipped.emit(image_path, "Translator", "")
+                    continue
+            except json.JSONDecodeError as e:
+                self.main_page.image_skipped.emit(image_path, "Translator", str(e))
+                continue
+
+            # Export raw/translated text if configured
+            export_settings = settings_page.get_export_settings()
+            export_mode = export_settings.get('export_location_mode', 'translated_folder')
+            custom_path = export_settings.get('export_custom_path', '')
+
+            base_output_dir = ""
+            if export_mode == 'custom' and custom_path:
+                if archive_bname:
+                    base_output_dir = custom_path
+                else:
+                    parent_dir_name = os.path.basename(directory)
+                    base_output_dir = os.path.join(custom_path, parent_dir_name)
+            else:
+                base_output_dir = os.path.join(directory, "Translated")
+
+            def get_save_path(category=None, sub_folder=""):
+                p = base_output_dir
+                if category and category != "translated_images":
+                    p = os.path.join(p, category)
+                if sub_folder:
+                    p = os.path.join(p, sub_folder)
+                if not os.path.exists(p):
+                    os.makedirs(p, exist_ok=True)
+                return p
+
+            if export_settings['export_raw_text']:
+                path = get_save_path("raw_texts", archive_bname)
+                with open(os.path.join(path, os.path.splitext(os.path.basename(image_path))[0] + "_raw.txt"), 'w', encoding='UTF-8') as file:
+                    file.write(entire_raw_text)
+
+            if export_settings['export_translated_text']:
+                path = get_save_path("translated_texts", archive_bname)
+                with open(os.path.join(path, os.path.splitext(os.path.basename(image_path))[0] + "_translated.txt"), 'w', encoding='UTF-8') as file:
+                    file.write(entire_translated_text)
+
+            # ─── Cache results for Phase 2 ───
+            deferred_cache[image_path] = {
+                'skip': False, 'no_blocks': False,
+                'blk_list': blk_list, 'image': image,
+                'base_name': base_name, 'extension': extension,
+                'directory': directory, 'archive_bname': archive_bname,
+                'source_lang': source_lang, 'target_lang': target_lang,
+                'trg_lng_cd': trg_lng_cd, 'base_output_dir': base_output_dir,
+            }
+            logger.info(f"[Phase 1] Cached {len(blk_list)} blocks for {base_name}{extension}")
+
+        # Unload detection/OCR models after Phase 1
+        if self.block_detection.block_detector_cache:
+            self.block_detection.block_detector_cache.unload()
+        if self.ocr_handler:
+            self.ocr_handler.unload()
+
+        logger.info(f"═══ PHASE 1 COMPLETE: {len(deferred_cache)}/{total_images} images cached ═══")
+
+        # ══════════════════════════════════════════════════════════════════
+        # PHASE 2 — Inpaint & Render all images
+        # ══════════════════════════════════════════════════════════════════
+        logger.info("═══ PHASE 2: Inpaint & Render ═══")
+
+        if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+            return
+
+        # Pre-create inpainter for Phase 2
+        _inp_backend = 'onnx'
+        _inp_device = resolve_device(settings_page.is_gpu_enabled(), backend=_inp_backend)
+        _inp_key = settings_page.get_tool_selection('inpainter')
+        _InpainterClass = inpaint_map[_inp_key]
+        self.inpainting.inpainter_cache = _InpainterClass(_inp_device, backend=_inp_backend)
+        self.inpainting.cached_inpainter_key = _inp_key
+        logger.info("Pre-created inpainter for Phase 2.")
+
+        # Signal the UI that models are loaded
+        self.main_page.models_loaded.emit()
+
+        for index, image_path in enumerate(image_list):
+            if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+                return
+
+            cached = deferred_cache.get(image_path)
+            if cached is None:
+                # Image was skipped in Phase 1 (OCR/translation error)
+                continue
+
+            _fname = os.path.basename(image_path)
+            image = cached['image']
+            base_name = cached['base_name']
+            extension = cached['extension']
+            directory = cached['directory']
+            archive_bname = cached['archive_bname']
+
+            export_mode = settings_page.get_export_settings().get('export_location_mode', 'translated_folder')
+            custom_path = settings_page.get_export_settings().get('export_custom_path', '')
+
+            base_output_dir = cached.get('base_output_dir', '')
+            if not base_output_dir:
+                if export_mode == 'custom' and custom_path:
+                    if archive_bname:
+                        base_output_dir = custom_path
+                    else:
+                        parent_dir_name = os.path.basename(directory)
+                        base_output_dir = os.path.join(custom_path, parent_dir_name)
+                else:
+                    base_output_dir = os.path.join(directory, "Translated")
+
+            def get_save_path(category=None, sub_folder=""):
+                p = base_output_dir
+                if category and category != "translated_images":
+                    p = os.path.join(p, category)
+                if sub_folder:
+                    p = os.path.join(p, sub_folder)
+                if not os.path.exists(p):
+                    os.makedirs(p, exist_ok=True)
+                return p
+
+            # Handle skip or no-blocks images — just copy original
+            if cached.get('skip', False) or cached.get('no_blocks', False):
+                render_save_dir = get_save_path(None, archive_bname)
+                sv_pth = os.path.join(render_save_dir, f"{base_name}{extension}")
+                imk.write_image(sv_pth, image)
+                if cached.get('skip'):
+                    logger.info(f"[Phase 2] Skipped image copied: {base_name}{extension}")
+                else:
+                    logger.info(f"[Phase 2] No-blocks image copied: {base_name}{extension}")
+                self.emit_progress(index, total_images, 10, 10, False, _fname)
+                continue
+
+            blk_list = cached['blk_list']
+            trg_lng_cd = cached['trg_lng_cd']
+            file_on_display = self.main_page.image_files[self.main_page.curr_img_idx]
+
+            # ─── Inpainting ───
+            self.emit_progress(index, total_images, 3, 10, True, _fname)
+            if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+                return
+
+            local_inpainter = self.inpainting.inpainter_cache
+            config = get_config(settings_page)
+            mask_dilation = settings_page.get_mask_dilation()
+
+            solid_filled_image = image.copy()
+            solid_fill_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+            remaining_blocks = blk_list
+
+            t0 = time.time()
+            if remaining_blocks:
+                mask = generate_mask(solid_filled_image, remaining_blocks, default_padding=mask_dilation)
+            else:
+                mask = np.zeros(image.shape[:2], dtype=np.uint8)
+
+            self.emit_progress(index, total_images, 4, 10, False, _fname)
+            if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+                return
+
+            t0 = time.time()
+            if np.any(mask):
+                inpaint_input_img = local_inpainter(solid_filled_image, mask, config)
+                inpaint_input_img = imk.convert_scale_abs(inpaint_input_img)
+                logger.info("\033[92m[Phase 2] AI Inpainting took %.2fs\033[0m", time.time() - t0)
+            else:
+                inpaint_input_img = solid_filled_image
+                logger.info("\033[92m[Phase 2] No inpainting needed in %.2fs\033[0m", time.time() - t0)
+
+            # Patch generation — keep local reference for direct use in rendering
+            local_patches = self.inpainting.get_inpainted_patches(mask, inpaint_input_img)
+            if np.any(solid_fill_mask):
+                solid_patches = self.inpainting.get_inpainted_patches(solid_fill_mask, solid_filled_image)
+                local_patches.extend(solid_patches)
+
+            self.main_page.patches_processed.emit(local_patches, image_path)
+
+            export_settings = settings_page.get_export_settings()
+            if export_settings['export_inpainted_image']:
+                path = get_save_path("cleaned_images", archive_bname)
+                imk.write_image(os.path.join(path, f"{base_name}_cleaned{extension}"), inpaint_input_img)
+
+            self.emit_progress(index, total_images, 5, 10, False, _fname)
+            if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+                return
+
+            # ─── Rendering ───
+            if render_settings is None:
+                render_settings = self.main_page.render_settings()
+
+            upper_case = render_settings.upper_case
+            outline = render_settings.outline
+            format_translations(blk_list, trg_lng_cd, upper_case=upper_case)
+            get_best_render_area(blk_list, image, inpaint_input_img)
+
+            font = render_settings.font_family
+            font_color = QColor(render_settings.color)
+            max_font_size = render_settings.max_font_size
+            min_font_size = render_settings.min_font_size
+            line_spacing = float(render_settings.line_spacing)
+            outline_width = float(render_settings.outline_width)
+            outline_color = QColor(render_settings.outline_color)
+            bold = render_settings.bold
+            italic = render_settings.italic
+            underline = render_settings.underline
+            alignment_id = render_settings.alignment_id
+            alignment = self.main_page.button_to_alignment[alignment_id]
+            direction = render_settings.direction
+
+            text_items_state = []
+            for blk in blk_list:
+                x1, y1, width, height = blk.xywh
+                translation = blk.translation
+                if not translation or len(translation) == 1:
+                    continue
+
+                translation, font_size, text_height = pyside_word_wrap(translation, font, width, height,
+                                                        line_spacing, outline_width, bold, italic, underline,
+                                                        alignment, direction, max_font_size, min_font_size)
+
+                if image_path == file_on_display:
+                    self.main_page.blk_rendered.emit(translation, font_size, text_height, blk)
+
+                if any(lang in trg_lng_cd.lower() for lang in ['zh', 'ja', 'th']):
+                    translation = translation.replace(' ', '')
+
+                if hasattr(render_settings, 'color_overrides') and render_settings.color_overrides:
+                    blk_class = getattr(blk, 'text_class', 'text_bubble')
+                    class_settings = render_settings.color_overrides.get(blk_class)
+                    if class_settings:
+                        override_text_color = class_settings.get('text_color')
+                        if override_text_color:
+                            font_color = QColor(override_text_color)
+
+                        if class_settings.get('outline_enabled', False):
+                            override_outline_color = class_settings.get('outline_color')
+                            if override_outline_color:
+                                outline_color = QColor(override_outline_color)
+                            override_outline_width = class_settings.get('outline_width')
+                            if override_outline_width:
+                                try:
+                                    outline_width = float(override_outline_width)
+                                except ValueError:
+                                    pass
+                        else:
+                            outline_color = None
+
+                effective_outline_width = float(outline_width) if outline else 0.0
+                font_color = get_smart_text_color(blk.font_color, font_color, effective_outline_width)
+                y_offset = (height - text_height) / 2
+
+                text_props = TextItemProperties(
+                    text=translation,
+                    font_family=font,
+                    font_size=font_size,
+                    text_color=font_color,
+                    alignment=alignment,
+                    line_spacing=line_spacing,
+                    outline_color=outline_color,
+                    outline_width=outline_width,
+                    bold=bold,
+                    italic=italic,
+                    underline=underline,
+                    position=(x1, y1 + y_offset),
+                    rotation=blk.angle,
+                    scale=1.0,
+                    transform_origin=blk.tr_origin_point,
+                    width=width,
+                    direction=direction,
+                    selection_outlines=[
+                        OutlineInfo(0, len(translation),
+                        outline_color,
+                        outline_width,
+                        OutlineType.Full_Document)
+                    ] if outline else [],
+                )
+                text_items_state.append(text_props.to_dict())
+
+            self.main_page.image_states[image_path]['viewer_state'].update({
+                'text_items_state': text_items_state
+            })
+            self.main_page.image_states[image_path]['viewer_state'].update({
+                'push_to_stack': True
+            })
+
+            self.emit_progress(index, total_images, 9, 10, False, _fname)
+            if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+                return
+
+            self.main_page.image_states[image_path].update({
+                'blk_list': blk_list
+            })
+
+            if image_path == file_on_display:
+                self.main_page.blk_list = blk_list
+
+            render_save_dir = get_save_path(None, archive_bname)
+            sv_pth = os.path.join(render_save_dir, f"{base_name}{extension}")
+
+            renderer = ImageSaveRenderer(image)
+            viewer_state = self.main_page.image_states[image_path]['viewer_state'].copy()
+            renderer.apply_patches(local_patches)
+            renderer.add_state_to_image(viewer_state)
+            renderer.save_image(sv_pth, _image_quality)
+
+            self.emit_progress(index, total_images, 10, 10, False, _fname)
+            logger.info(f"[Phase 2] Saved {base_name}{extension}")
+
+        # Free deferred cache
+        deferred_cache.clear()
+
+        logger.info("═══ PHASE 2 COMPLETE ═══")
+
+        # ── Archive packing (same as normal flow) ──
+        archive_info_list = self.main_page.file_handler.archive_info
+        if archive_info_list:
+            save_as_settings = settings_page.get_export_settings()['save_as']
+            for archive_index, archive in enumerate(archive_info_list):
+                if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+                    self.main_page.current_worker = None
+                    break
+
+                archive_path = archive['archive_path']
+                archive_bname = os.path.splitext(os.path.basename(archive_path))[0].strip()
+
+                export_mode = settings_page.get_export_settings().get('export_location_mode', 'translated_folder')
+                custom_path = settings_page.get_export_settings().get('export_custom_path', '')
+                archive_dir = os.path.dirname(archive_path)
+
+                base_output_dir = ""
+                if export_mode == 'custom' and custom_path:
+                    base_output_dir = os.path.join(custom_path, archive_bname)
+                else:
+                    base_output_dir = os.path.join(archive_dir, "Translated")
+
+                input_dir_for_packing = os.path.join(base_output_dir, archive_bname)
+                final_output_dir = base_output_dir
+
+                if not os.path.exists(final_output_dir):
+                    os.makedirs(final_output_dir, exist_ok=True)
+
+                output_base_name = f"{archive_bname}"
+
+                if os.path.exists(input_dir_for_packing):
+                    make(save_as_ext=save_as_settings, input_dir=input_dir_for_packing,
+                        output_dir=final_output_dir, output_base_name=output_base_name)
+                    if os.path.exists(input_dir_for_packing):
+                        shutil.rmtree(input_dir_for_packing)

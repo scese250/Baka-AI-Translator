@@ -248,6 +248,7 @@ class SettingsPageUI(QtWidgets.QWidget):
         self.crop_trigger_spinbox = self.tools_page.crop_trigger_spinbox
         self.dilation_spinbox = self.tools_page.dilation_spinbox
         self.use_gpu_checkbox = self.tools_page.use_gpu_checkbox
+        self.translate_first_checkbox = self.tools_page.translate_first_checkbox
 
         # Credentials
         # self.save_keys_checkbox = self.credentials_page.save_keys_checkbox

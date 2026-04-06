@@ -23,17 +23,26 @@ class ImageStateController:
     def __init__(self, main: ComicTranslate):
         self.main = main
         
-        # Initialize lazy image loader for list view
-        self.page_list_loader = ListViewImageLoader(
-            self.main.page_list,
-            avatar_size=(35, 50)
-        )
+        # Dev-only: .nothumb in project root disables all thumbnails/previews
+        _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.nothumb = os.path.exists(os.path.join(_project_root, '.nothumb'))
+        
+        # Initialize lazy image loader for list view (skip in nothumb mode)
+        if not self.nothumb:
+            self.page_list_loader = ListViewImageLoader(
+                self.main.page_list,
+                avatar_size=(35, 50)
+            )
+        else:
+            self.page_list_loader = None
 
     def load_initial_image(self, file_paths: List[str]):
         file_paths = self.main.file_handler.prepare_files(file_paths)
         self.main.image_files = file_paths
 
         if file_paths:
+            if self.nothumb:
+                return None
             return self.load_image(file_paths[0])
         return None
     
@@ -86,7 +95,8 @@ class ImageStateController:
         self.main.page_list.blockSignals(True)
         self.main.page_list.clear()
         self.main.page_list.blockSignals(False)
-        self.page_list_loader.clear()
+        if self.page_list_loader:
+            self.page_list_loader.clear()
 
         # Reset current_image_index
         self.main.curr_img_idx = -1
@@ -189,6 +199,8 @@ class ImageStateController:
 
     def _process_state_init_chunk(self, chunk_size=15):
         """Process state initialization in chunks to keep the UI responsive."""
+        if self.nothumb:
+            chunk_size = 200
         if not self._pending_state_files:
             # All state initialized — proceed to card creation
             self._finish_initial_load()
@@ -211,14 +223,20 @@ class ImageStateController:
         if self.main.image_files:
             self.main.page_list.blockSignals(True)
             self.update_image_cards()
-            self.main.page_list.blockSignals(False)
-            self.main.page_list.setCurrentRow(0)
-            self.main.loaded_images.append(self.main.image_files[0])
+            if self.nothumb:
+                # nothumb: select first row without triggering image load
+                self.main.page_list.setCurrentRow(0)
+                self.main.page_list.blockSignals(False)
+            else:
+                self.main.page_list.blockSignals(False)
+                self.main.page_list.setCurrentRow(0)
+                self.main.loaded_images.append(self.main.image_files[0])
         else:
             self.main.image_viewer.clear_scene()
 
-        self.main.image_viewer.resetTransform()
-        self.main.image_viewer.fitInView()
+        if not self.nothumb:
+            self.main.image_viewer.resetTransform()
+            self.main.image_viewer.fitInView()
 
     def update_image_cards(self):
         # Clear existing items
@@ -232,10 +250,14 @@ class ImageStateController:
 
     def _process_card_chunk(self, chunk_size=15):
         """Process card creation in chunks to keep the UI responsive."""
+        if self.nothumb:
+            chunk_size = 200
+
         if not self._pending_card_files:
-            # All cards created — initialize lazy loading
-            self.page_list_loader.set_file_paths(
-                self.main.image_files, self.main.image_cards)
+            # All cards created — initialize lazy loading (skip in nothumb mode)
+            if self.page_list_loader:
+                self.page_list_loader.set_file_paths(
+                    self.main.image_files, self.main.image_cards)
             return
 
         chunk = self._pending_card_files[:chunk_size]
@@ -244,7 +266,10 @@ class ImageStateController:
         for index, file_path in chunk:
             file_name = os.path.basename(file_path)
             list_item = QtWidgets.QListWidgetItem(file_name)
-            card = ClickMeta(extra=False, avatar_size=(35, 50))
+            if self.nothumb:
+                card = ClickMeta(extra=False)
+            else:
+                card = ClickMeta(extra=False, avatar_size=(35, 50))
             card.setup_data({
                 "title": file_name,
             })
@@ -265,7 +290,8 @@ class ImageStateController:
             index = self.main.page_list.row(current)
             self.main.curr_tblock_item = None
             # Force load the selected image thumbnail
-            self.page_list_loader.force_load_image(index)
+            if self.page_list_loader:
+                self.page_list_loader.force_load_image(index)
 
             # Avoid circular calls when in webtoon mode
             if getattr(self.main, '_processing_page_change', False):
@@ -714,5 +740,5 @@ class ImageStateController:
 
     def cleanup(self):
         """Clean up resources, including the lazy loader."""
-        if hasattr(self, 'page_list_loader'):
+        if hasattr(self, 'page_list_loader') and self.page_list_loader:
             self.page_list_loader.shutdown()

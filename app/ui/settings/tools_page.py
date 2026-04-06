@@ -101,6 +101,13 @@ class ToolsPage(QtWidgets.QWidget):
 
         self.use_gpu_checkbox = MCheckBox(self.tr("Use GPU"))
 
+        self.translate_first_checkbox = MCheckBox(self.tr("Translate First"))
+        self.translate_first_checkbox.setToolTip(self.tr(
+            "When enabled, batch processing will extract and translate ALL pages first,\n"
+            "then perform inpainting and text rendering afterwards.\n"
+            "This is useful for large batches: if translation fails, no time is wasted on inpainting."
+        ))
+
         layout.addWidget(translator_widget)
         layout.addSpacing(10)
         layout.addWidget(detector_widget)
@@ -129,6 +136,7 @@ class ToolsPage(QtWidgets.QWidget):
         layout.addWidget(self.hd_strategy_widgets)
         layout.addSpacing(10)
         layout.addWidget(self.use_gpu_checkbox)
+        layout.addWidget(self.translate_first_checkbox)
         layout.addStretch(1)
 
         self._update_hd_strategy_widgets(self.inpaint_strategy_combo.currentIndex())
