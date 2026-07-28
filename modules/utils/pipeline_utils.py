@@ -105,6 +105,39 @@ def lists_to_blk_list(blk_list: list[TextBlock], texts_bboxes: list, texts_strin
     return blk_list
 
 
+def classify_uniform_region(region: np.ndarray) -> tuple:
+    """Classify a region as having a uniform white, black, or gray background.
+
+    Returns (fill_color, (p05, p50, p95)) where fill_color is None if the
+    region is considered complex/non-uniform.
+    """
+    if region is None or region.size == 0:
+        return None, (None, None, None)
+
+    if len(region.shape) == 3:
+        gray = np.mean(region, axis=2)
+    else:
+        gray = region
+
+    p95 = float(np.percentile(gray, 95))
+    p05 = float(np.percentile(gray, 5))
+    p50 = float(np.percentile(gray, 50))
+
+    fill_color = None
+    # White bubble: 95th percentile is very bright (>240) with high contrast
+    # and the median is also bright (avoids white text inside black bubbles).
+    if p95 > 240 and p50 > 200 and (p95 - p05) > 80:
+        fill_color = (255, 255, 255)
+    # Black bubble: 5th percentile is very dark and median is dark
+    elif p05 < 20 and p50 < 60 and (p95 - p05) > 80:
+        fill_color = (0, 0, 0)
+    # Uniform gray/color: low variance (tight distribution)
+    elif abs(p95 - p05) < 35:
+        fill_color = (int(p50), int(p50), int(p50))
+
+    return fill_color, (p05, p50, p95)
+
+
 def apply_solid_fill_for_uniform_bubbles(
     image: np.ndarray, 
     blk_list: list[TextBlock], 
@@ -150,28 +183,7 @@ def apply_solid_fill_for_uniform_bubbles(
             remaining_blocks.append(blk)
             continue
         
-        # Convert to grayscale for analysis
-        if len(region.shape) == 3:
-            gray = np.mean(region, axis=2)
-        else:
-            gray = region
-        
-        # Use percentile to detect dominant background color
-        p95 = np.percentile(gray, 95)
-        p05 = np.percentile(gray, 5)
-        p50 = np.percentile(gray, 50)
-        
-        fill_color = None
-        
-        # White bubble: 95th percentile is very bright (>240) with high contrast
-        if p95 > 240 and (p95 - p05) > 80:
-            fill_color = (255, 255, 255)
-        # Black bubble: 5th percentile is very dark and median is dark
-        elif p05 < 20 and p50 < 60 and (p95 - p05) > 80:
-            fill_color = (0, 0, 0)
-        # Uniform gray/color: low variance (tight distribution)
-        elif abs(p95 - p05) < 35:
-            fill_color = (int(p50), int(p50), int(p50))
+        fill_color, _ = classify_uniform_region(region)
         
         if fill_color is None:
             # Complex background - needs AI inpainting
@@ -421,43 +433,37 @@ def is_directory_empty(directory):
                     return False
     return True
 
+_WHITE = QColor(255, 255, 255)
+_BLACK = QColor(0, 0, 0)
+
+
+def _get_luma(c: QColor) -> float:
+    return 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+
+
 def get_smart_text_color(detected_rgb: tuple, setting_color: QColor, outline_width: float = 0.0) -> QColor:
     """
     Determines the best text color to use based on the detected color from the image
     and the user's preferred setting color. Prevents invisible text (e.g. white on white).
-    
-    CRITICAL: If an outline is present, we TRUST the user's color choice because the outline 
-    provides necessary contrast. We disable smart correction in this case.
+
+    - Even with outline active: if detected text is bright (white on dark bg) and
+      user setting is dark, force pure WHITE. Inverse case forces BLACK.
+    - Without outline: same pure white/black forcing based on contrast.
+    - Otherwise: returns the user's setting color.
     """
-    # If user has an outline enabled, trust their color choice. Outline guarantees contrast.
-    if outline_width > 0:
-        return setting_color
+    if detected_rgb is not None:
+        try:
+            detected_color = QColor(*detected_rgb)
+            if detected_color.isValid():
+                det_luma = _get_luma(detected_color)
+                set_luma = _get_luma(setting_color)
+                # Bright text on dark background + user wants dark → force white
+                if det_luma > 140 and set_luma < 100:
+                    return _WHITE
+                # Dark text on light background + user wants light → force black
+                if det_luma < 100 and set_luma > 140:
+                    return _BLACK
+        except Exception:
+            pass
 
-    if not detected_rgb:
-        return setting_color
-
-    try:
-        detected_color = QColor(*detected_rgb)
-        if not detected_color.isValid():
-            return setting_color
-
-        def get_luma(c):
-            return 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
-        
-        det_luma = get_luma(detected_color)
-        set_luma = get_luma(setting_color)
-        
-        # If detected is Light (likely on Dark BG) and Setting is Dark
-        # e.g. White text on Black BG, but user setting is Black
-        if det_luma > 140 and set_luma < 100:
-            return detected_color
-        
-        # If detected is Dark (likely on Light BG) and Setting is Light
-        # e.g. Black text on White BG, but user setting is White
-        elif det_luma < 100 and set_luma > 140:
-            return detected_color
-            
-    except Exception:
-        pass
-        
     return setting_color

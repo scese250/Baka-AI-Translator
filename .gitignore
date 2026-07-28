@@ -34,3 +34,6 @@ Thumbs.db
 
 # Colab notebook port
 Colab/
+.freebuff/
+Zona de pruebas/
+Port/
