@@ -441,14 +441,17 @@ def _get_luma(c: QColor) -> float:
     return 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
 
 
-def get_smart_text_color(detected_rgb: tuple, setting_color: QColor, outline_width: float = 0.0) -> QColor:
+def get_smart_text_color(detected_rgb: tuple, setting_color: QColor, outline_width: float = 0.0) -> tuple[QColor, QColor | None]:
     """
     Determines the best text color to use based on the detected color from the image
     and the user's preferred setting color. Prevents invisible text (e.g. white on white).
 
-    - Even with outline active: if detected text is bright (white on dark bg) and
-      user setting is dark, force pure WHITE. Inverse case forces BLACK.
-    - Without outline: same pure white/black forcing based on contrast.
+    Returns (text_color, forced_outline_color).
+    forced_outline_color is BLACK when text is forced WHITE (dark background detected),
+    or None when no outline override is needed.
+
+    - If detected text is bright/white (dark/black background), forces WHITE text + BLACK outline.
+    - If detected text is dark on light background + user setting is light, forces BLACK text.
     - Otherwise: returns the user's setting color.
     """
     if detected_rgb is not None:
@@ -456,14 +459,14 @@ def get_smart_text_color(detected_rgb: tuple, setting_color: QColor, outline_wid
             detected_color = QColor(*detected_rgb)
             if detected_color.isValid():
                 det_luma = _get_luma(detected_color)
+                # White text on dark/black background: force WHITE + BLACK outline
+                if det_luma > 100:
+                    return _WHITE, _BLACK
+                # Dark text on light background + user setting is light: force BLACK
                 set_luma = _get_luma(setting_color)
-                # Bright text on dark background + user wants dark → force white
-                if det_luma > 140 and set_luma < 100:
-                    return _WHITE
-                # Dark text on light background + user wants light → force black
-                if det_luma < 100 and set_luma > 140:
-                    return _BLACK
+                if det_luma <= 100 and set_luma > 140:
+                    return _BLACK, None
         except Exception:
             pass
 
-    return setting_color
+    return setting_color, None

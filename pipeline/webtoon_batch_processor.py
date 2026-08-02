@@ -828,7 +828,9 @@ class WebtoonBatchProcessor:
                         outline_color = None
 
             # Smart Color Override (fallback for detected colors)
-            font_color = get_smart_text_color(blk_virtual.font_color, font_color)
+            font_color, smart_outline_color = get_smart_text_color(blk_virtual.font_color, font_color)
+            if smart_outline_color is not None:
+                outline_color = smart_outline_color
 
             render_blk = blk_virtual.deep_copy()
             render_blk.xyxy = list(physical_coords)
@@ -881,7 +883,7 @@ class WebtoonBatchProcessor:
                         outline_width, 
                         OutlineType.Full_Document
                     )
-                ] if outline else [],
+                ] if (outline or smart_outline_color is not None) else [],
             )
             text_items_state.append(text_props.to_dict())
             page_blk_list.append(render_blk)

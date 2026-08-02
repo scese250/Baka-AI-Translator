@@ -690,7 +690,9 @@ class BatchProcessor:
                                 outline_color = None
 
                     effective_outline_width = float(outline_width) if outline else 0.0
-                    font_color = get_smart_text_color(blk.font_color, font_color, effective_outline_width)
+                    font_color, smart_outline_color = get_smart_text_color(blk.font_color, font_color, effective_outline_width)
+                    if smart_outline_color is not None:
+                        outline_color = smart_outline_color
                     y_offset = (height - text_height) / 2
 
                     text_props = TextItemProperties(
@@ -716,7 +718,7 @@ class BatchProcessor:
                             outline_color, 
                             outline_width, 
                             OutlineType.Full_Document)
-                        ] if outline else [],
+                        ] if (outline or smart_outline_color is not None) else [],
                     )
                     text_items_state.append(text_props.to_dict())
 
@@ -1260,7 +1262,9 @@ class BatchProcessor:
                             outline_color = None
 
                 effective_outline_width = float(outline_width) if outline else 0.0
-                font_color = get_smart_text_color(blk.font_color, font_color, effective_outline_width)
+                font_color, smart_outline_color = get_smart_text_color(blk.font_color, font_color, effective_outline_width)
+                if smart_outline_color is not None:
+                    outline_color = smart_outline_color
                 y_offset = (height - text_height) / 2
 
                 text_props = TextItemProperties(
@@ -1286,7 +1290,7 @@ class BatchProcessor:
                         outline_color,
                         outline_width,
                         OutlineType.Full_Document)
-                    ] if outline else [],
+                    ] if (outline or smart_outline_color is not None) else [],
                 )
                 text_items_state.append(text_props.to_dict())
 

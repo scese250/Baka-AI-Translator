@@ -67,7 +67,7 @@ class TextController:
         text_color = QColor(text_color_str)
 
         # Smart Color Override
-        text_color = get_smart_text_color(blk.font_color, text_color)
+        text_color, smart_outline_color = get_smart_text_color(blk.font_color, text_color)
 
         id = render_settings.alignment_id
         alignment = self.main.button_to_alignment[id]
@@ -124,6 +124,10 @@ class TextController:
                     # So if class_settings exists, we should probably follow it for outline too.
                     # So if outline_enabled is False, force outline_color to None to disable it.
                     outline_color = None
+
+        # Apply forced outline from smart color detection (e.g. white text on black bg)
+        if smart_outline_color is not None:
+            outline_color = smart_outline_color
 
         bold = render_settings.bold
         italic = render_settings.italic
