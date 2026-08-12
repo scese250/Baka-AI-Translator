@@ -67,7 +67,7 @@ class TextController:
         text_color = QColor(text_color_str)
 
         # Smart Color Override
-        text_color, smart_outline_color = get_smart_text_color(blk.font_color, text_color)
+        text_color, smart_outline_color = get_smart_text_color(blk.font_color, text_color, 0.0, blk.bg_luma)
 
         id = render_settings.alignment_id
         alignment = self.main.button_to_alignment[id]

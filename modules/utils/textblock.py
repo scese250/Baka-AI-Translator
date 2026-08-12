@@ -28,6 +28,7 @@ class TextBlock(object):
                  max_font_size: int = 0,
                  font_color: tuple = (),
                  direction: str = "",
+                 bg_luma: float = None,
                  **kwargs) -> None:
         
         self.xyxy = text_bbox
@@ -56,6 +57,7 @@ class TextBlock(object):
         self.max_font_size = max_font_size
         self.font_color = font_color
         self.direction = direction
+        self.bg_luma = bg_luma
 
     @property
     def xywh(self):
@@ -105,6 +107,7 @@ class TextBlock(object):
         new_block.min_font_size = self.min_font_size
         new_block.max_font_size = self.max_font_size
         new_block.font_color = self.font_color
+        new_block.bg_luma = self.bg_luma
         
         return new_block
 

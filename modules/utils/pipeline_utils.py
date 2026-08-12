@@ -441,19 +441,62 @@ def _get_luma(c: QColor) -> float:
     return 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
 
 
-def get_smart_text_color(detected_rgb: tuple, setting_color: QColor, outline_width: float = 0.0) -> tuple[QColor, QColor | None]:
+def estimate_background_luma(region: np.ndarray) -> float | None:
     """
-    Determines the best text color to use based on the detected color from the image
-    and the user's preferred setting color. Prevents invisible text (e.g. white on white).
+    Estimate the background brightness of a region that may still contain text pixels.
+
+    Uses percentiles so the text's own pixels don't dominate the estimate:
+    - Light background: the 95th percentile and the median are both bright.
+    - Dark background: even the lightest 5%% of pixels stay dark.
+    Returns None when the background can't be classified confidently
+    (mid-gray, or a region where text covers too much of the area).
+    """
+    if region is None or region.size == 0:
+        return None
+
+    gray = np.mean(region, axis=2) if region.ndim == 3 else region.astype(np.float32)
+    p05 = float(np.percentile(gray, 5))
+    p50 = float(np.percentile(gray, 50))
+    p95 = float(np.percentile(gray, 95))
+
+    if p95 > 200 and p50 > 120:
+        return (p50 + p95) / 2.0
+    if p95 < 160 and p50 < 135 and p05 < 55:
+        return (p05 + p50) / 2.0
+    return None
+
+
+def get_smart_text_color(detected_rgb: tuple, setting_color: QColor, outline_width: float = 0.0,
+                         bg_luma: float = None) -> tuple[QColor, QColor | None]:
+    """
+    Determines the best text color to use based on the actual background brightness
+    (when known) and the user's preferred setting color. Prevents invisible text
+    (e.g. white on white, or black on dark gray).
 
     Returns (text_color, forced_outline_color).
     forced_outline_color is BLACK when text is forced WHITE (dark background detected),
     or None when no outline override is needed.
 
-    - If detected text is bright/white (dark/black background), forces WHITE text + BLACK outline.
-    - If detected text is dark on light background + user setting is light, forces BLACK text.
+    - If the background is dark (bg_luma < 128): forces WHITE text + BLACK outline.
+    - If the background is light and the user setting color is light: forces BLACK text.
     - Otherwise: returns the user's setting color.
+
+    When bg_luma is None (no background info available), falls back to the legacy
+    heuristic based on the detected text color:
+    - Bright/white detected text (assumed dark background): WHITE text + BLACK outline.
+    - Dark detected text + light user setting: BLACK text.
     """
+    if bg_luma is not None:
+        if bg_luma < 128:
+            # Dark background: dark letters would be invisible. Force WHITE + BLACK.
+            return _WHITE, _BLACK
+        # Light background: keep the user color unless it would be invisible
+        # (light text on a light background), in which case force BLACK.
+        set_luma = _get_luma(setting_color)
+        if set_luma > 140:
+            return _BLACK, None
+        return setting_color, None
+
     if detected_rgb is not None:
         try:
             detected_color = QColor(*detected_rgb)

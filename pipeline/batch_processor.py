@@ -637,13 +637,10 @@ class BatchProcessor:
                 get_best_render_area(blk_list, image, inpaint_input_img)
 
                 font = render_settings.font_family
-                font_color = QColor(render_settings.color)
 
                 max_font_size = render_settings.max_font_size
                 min_font_size = render_settings.min_font_size
                 line_spacing = float(render_settings.line_spacing) 
-                outline_width = float(render_settings.outline_width)
-                outline_color = QColor(render_settings.outline_color) 
                 bold = render_settings.bold
                 italic = render_settings.italic
                 underline = render_settings.underline
@@ -653,6 +650,14 @@ class BatchProcessor:
                     
                 text_items_state = []
                 for blk in blk_list:
+                    # Reset colors per block. Previously these were initialized
+                    # once before the loop and mutated inside it, so a forced
+                    # BLACK outline (from a bright-text block, e.g. inside a
+                    # black bubble) leaked into the next block and rendered
+                    # black text with a black outline (fully black letters).
+                    font_color = QColor(render_settings.color)
+                    outline_width = float(render_settings.outline_width)
+                    outline_color = QColor(render_settings.outline_color)
                     x1, y1, width, height = blk.xywh
                     translation = blk.translation
                     if not translation or len(translation) == 1:
@@ -690,7 +695,7 @@ class BatchProcessor:
                                 outline_color = None
 
                     effective_outline_width = float(outline_width) if outline else 0.0
-                    font_color, smart_outline_color = get_smart_text_color(blk.font_color, font_color, effective_outline_width)
+                    font_color, smart_outline_color = get_smart_text_color(blk.font_color, font_color, effective_outline_width, blk.bg_luma)
                     if smart_outline_color is not None:
                         outline_color = smart_outline_color
                     y_offset = (height - text_height) / 2
@@ -1210,12 +1215,9 @@ class BatchProcessor:
             get_best_render_area(blk_list, image, inpaint_input_img)
 
             font = render_settings.font_family
-            font_color = QColor(render_settings.color)
             max_font_size = render_settings.max_font_size
             min_font_size = render_settings.min_font_size
             line_spacing = float(render_settings.line_spacing)
-            outline_width = float(render_settings.outline_width)
-            outline_color = QColor(render_settings.outline_color)
             bold = render_settings.bold
             italic = render_settings.italic
             underline = render_settings.underline
@@ -1225,6 +1227,12 @@ class BatchProcessor:
 
             text_items_state = []
             for blk in blk_list:
+                # Reset colors per block (see note in batch_process): colors
+                # used to leak across blocks, producing black text with a
+                # black outline for blocks processed after a bright-text block.
+                font_color = QColor(render_settings.color)
+                outline_width = float(render_settings.outline_width)
+                outline_color = QColor(render_settings.outline_color)
                 x1, y1, width, height = blk.xywh
                 translation = blk.translation
                 if not translation or len(translation) == 1:
@@ -1262,7 +1270,7 @@ class BatchProcessor:
                             outline_color = None
 
                 effective_outline_width = float(outline_width) if outline else 0.0
-                font_color, smart_outline_color = get_smart_text_color(blk.font_color, font_color, effective_outline_width)
+                font_color, smart_outline_color = get_smart_text_color(blk.font_color, font_color, effective_outline_width, blk.bg_luma)
                 if smart_outline_color is not None:
                     outline_color = smart_outline_color
                 y_offset = (height - text_height) / 2

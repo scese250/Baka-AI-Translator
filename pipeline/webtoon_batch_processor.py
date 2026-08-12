@@ -766,10 +766,10 @@ class WebtoonBatchProcessor:
 
         # Prepare render settings
         render_settings = self.main_page.render_settings()
-        font, font_color = render_settings.font_family, QColor(render_settings.color)
+        font = render_settings.font_family
         max_font_size, min_font_size = render_settings.max_font_size, render_settings.min_font_size
-        line_spacing, outline_width = float(render_settings.line_spacing), float(render_settings.outline_width)
-        outline_color, outline = QColor(render_settings.outline_color), render_settings.outline
+        line_spacing = float(render_settings.line_spacing)
+        outline = render_settings.outline
         bold, italic, underline = render_settings.bold, render_settings.italic, render_settings.underline
         alignment = self.main_page.button_to_alignment[render_settings.alignment_id]
         direction = render_settings.direction
@@ -785,6 +785,14 @@ class WebtoonBatchProcessor:
 
         # Process each block
         for blk_virtual in blk_list_virtual:
+            # Reset colors per block. Previously they were initialized once
+            # before the loop and mutated inside it, so a forced BLACK outline
+            # (from a bright-text block, e.g. inside a black bubble) leaked
+            # into the next block, rendering black text with a black outline.
+            font_color = QColor(render_settings.color)
+            outline_width = float(render_settings.outline_width)
+            outline_color = QColor(render_settings.outline_color)
+
             physical_coords = vpage.virtual_to_physical_coords(blk_virtual.xyxy)
             x1, y1, x2, y2 = physical_coords
             width, height = x2 - x1, y2 - y1
@@ -828,7 +836,7 @@ class WebtoonBatchProcessor:
                         outline_color = None
 
             # Smart Color Override (fallback for detected colors)
-            font_color, smart_outline_color = get_smart_text_color(blk_virtual.font_color, font_color)
+            font_color, smart_outline_color = get_smart_text_color(blk_virtual.font_color, font_color, 0.0, blk_virtual.bg_luma)
             if smart_outline_color is not None:
                 outline_color = smart_outline_color
 

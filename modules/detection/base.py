@@ -3,6 +3,7 @@ import numpy as np
 from typing import Optional
 
 from ..utils.textblock import TextBlock
+from ..utils.pipeline_utils import estimate_background_luma
 from .utils.geometry import does_rectangle_fit, do_rectangles_overlap, \
     merge_overlapping_boxes
 from .font.engine import FontEngineFactory
@@ -63,6 +64,7 @@ class DetectionEngine(ABC):
         if len(text_boxes) > 0:
             for txt_idx, txt_box in enumerate(text_boxes):
                 font_attrs = {}
+                bg_luma = None
                 # Calculate font attributes using FontEngine
                 try:
                     x1, y1, x2, y2 = map(int, txt_box)
@@ -75,6 +77,7 @@ class DetectionEngine(ABC):
                     
                     if x2 > x1 and y2 > y1:
                         crop = image[y1:y2, x1:x2]
+                        bg_luma = estimate_background_luma(crop)
                         font_engine = FontEngineFactory.create_engine(self.settings, backend='onnx')
                         font_attrs = font_engine.process(crop)
                 except Exception as e:
@@ -85,23 +88,8 @@ class DetectionEngine(ABC):
 
                 # Detect Inside Black Bubble (White text on dark background)
                 special_class = None
-                if len(text_color) == 3 and np.mean(text_color) > 170:
-                    # Check background darkness using the crop
-                    # Ensure crop is available (it should be if font_attrs has text_color)
-                    try:
-                        # Re-extract crop if needed or rely on variable scope if safe (Python leaks scope but safer to re-extract or check)
-                        # Given the structure, 'crop' is defined in the try block above. 
-                        # To be safe and robust:
-                        if 'crop' in locals():
-                             if len(crop.shape) == 3:
-                                 bg_intensity = np.mean(crop)
-                             else:
-                                 bg_intensity = np.mean(crop)
-                             
-                             if bg_intensity < 115:
-                                 special_class = 'text_inside_black_bubble'
-                    except Exception:
-                        pass
+                if len(text_color) == 3 and np.mean(text_color) > 170 and bg_luma is not None and bg_luma < 115:
+                    special_class = 'text_inside_black_bubble'
 
                 # If no bubble boxes, all text is free text
                 if len(bubble_boxes) == 0:
@@ -111,6 +99,7 @@ class DetectionEngine(ABC):
                             text_class=special_class or 'text_free',
                             direction=direction,
                             font_color=text_color,
+                            bg_luma=bg_luma,
                         )
                     )
                     continue
@@ -127,6 +116,7 @@ class DetectionEngine(ABC):
                                 text_class=special_class or 'text_bubble',
                                 direction=direction,
                                 font_color=text_color,
+                                bg_luma=bg_luma,
                             )
                         )
                         text_matched[txt_idx] = True  
@@ -140,6 +130,7 @@ class DetectionEngine(ABC):
                                 text_class=special_class or 'text_bubble',
                                 direction=direction,
                                 font_color=text_color,
+                                bg_luma=bg_luma,
                             )
                         )
                         text_matched[txt_idx] = True  
@@ -152,6 +143,7 @@ class DetectionEngine(ABC):
                             text_class=special_class or 'text_free',
                             direction=direction,
                             font_color=text_color,
+                            bg_luma=bg_luma,
                         )
                     )
         
