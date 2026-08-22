@@ -101,11 +101,14 @@ def set_upper_case(blk_list: list[TextBlock], upper_case: bool):
 def normalize_quotes(blk_list: list[TextBlock]):
     """
     Post-translation filter: replaces Spanish guillemets and curly quotes
-    with straight double quotes in all translated blocks.
-    
+    with straight double quotes, and fixes punctuation order for Spanish
+    exclamation/question mark pairs.
+
     Replacements:
       « » → "
       \u201c \u201d → "
+      ¿¡ → ¡¿
+      !? → ?!
     """
     for blk in blk_list:
         if not blk.translation:
@@ -116,6 +119,8 @@ def normalize_quotes(blk_list: list[TextBlock]):
             .replace('\u00bb', '"')   # »
             .replace('\u201c', '"')   # "
             .replace('\u201d', '"')   # "
+            .replace('¿¡', '¡¿')
+            .replace('!?', '?!')
         )
 
 

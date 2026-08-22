@@ -142,70 +142,130 @@ class BaseLLMTranslation(LLMTranslation):
         Return a copy of the image with each text block annotated with a red
         bounding box and a "BLOCK N" label.
 
-        Uses bubble_xyxy when available, otherwise falls back to xyxy.
+        Uses xyxy (text bbox) for a tight annotation around the actual text.
         """
         if image is None:
             return image
 
-        # Convert numpy array to PIL Image
         if image.dtype != np.uint8:
             img_u8 = image.astype(np.uint8)
         else:
             img_u8 = image.copy()
 
-        if len(img_u8.shape) == 2:
-            pil_img = Image.fromarray(img_u8, mode='L').convert('RGB')
+        is_color = img_u8.ndim == 3 and img_u8.shape[2] >= 3
+
+        # Pipeline images are BGR (OpenCV); PIL expects RGB — swap channels
+        if is_color:
+            pil_img = Image.fromarray(img_u8[..., :3][..., ::-1])
         else:
-            pil_img = Image.fromarray(img_u8)
+            pil_img = Image.fromarray(img_u8).convert('RGB')
 
         draw = ImageDraw.Draw(pil_img)
         img_h, img_w = image.shape[:2]
-        lw = max(2, round((img_w + img_h) / 2 * 0.004))  # adaptive line width
-        font_size = max(14, round((img_w + img_h) / 2 * 0.022))
+        lw = max(2, round((img_w + img_h) / 2 * 0.004))
+        font_size = max(12, round((img_w + img_h) / 2 * 0.018))
 
-        # Try to load the project's bold font; fall back to PIL default
-        font_path = os.path.join(
-            os.path.dirname(__file__),       # llm/
-            '..', '..', '..', 'font',        # -> project root/font/
-            'AnimeAce3BB_Bold.otf'
-        )
-        font_path = os.path.normpath(font_path)
+        font_path = os.path.normpath(os.path.join(
+            os.path.dirname(__file__), '..', '..', '..', 'font', 'AnimeAce3BB_Bold.otf'
+        ))
         try:
             font = ImageFont.truetype(font_path, size=font_size)
         except (IOError, OSError):
             font = ImageFont.load_default()
 
-        RED = (220, 30, 30)
-        WHITE = (255, 255, 255)
+        RED    = (220, 30, 30)
+        YELLOW = (255, 255, 0)
+        BLACK  = (0, 0, 0)
+
+        GAP = 4  # minimum pixel gap between labels
+
+        def _rects_overlap(a, b):
+            """Return True if rectangles (x1,y1,x2,y2) a and b overlap or are within GAP pixels."""
+            return (a[0] - GAP < b[2] and a[2] + GAP > b[0] and
+                    a[1] - GAP < b[3] and a[3] + GAP > b[1])
+
+        placed_labels = []  # list of (lx1, ly1, lx2, ly2) already drawn
 
         for i, blk in enumerate(blk_list):
-            # Prefer bubble bbox for the visual frame
-            bbox = blk.bubble_xyxy if blk.bubble_xyxy is not None else blk.xyxy
+            # Use text bbox (xyxy) — tighter than the full speech bubble
+            bbox = blk.xyxy
             if bbox is None:
                 continue
 
             x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
 
-            # Draw bounding box
+            # Draw bounding box (multi-pixel outline)
             for offset in range(lw):
-                draw.rectangle([x1 - offset, y1 - offset, x2 + offset, y2 + offset], outline=RED)
+                draw.rectangle(
+                    [x1 - offset, y1 - offset, x2 + offset, y2 + offset],
+                    outline=RED
+                )
 
-            # Draw label background + text
+            # Measure label text
             label = f"BLOCK {i}"
             try:
-                # Pillow >= 10.0 uses getbbox
                 tb = font.getbbox(label)
-                tw, th = tb[2] - tb[0], tb[3] - tb[1]
+                # tb = (left, top, right, bottom); offset must be subtracted when drawing
+                t_left, t_top = tb[0], tb[1]
+                tw, th = tb[2] - t_left, tb[3] - t_top
             except AttributeError:
                 tw, th = font.getsize(label)
+                t_left, t_top = 0, 0
 
             pad = 3
-            lx1 = x1
-            ly1 = max(0, y1 - th - pad * 2)
-            draw.rectangle([lx1, ly1, lx1 + tw + pad * 2, ly1 + th + pad * 2], fill=RED)
-            draw.text((lx1 + pad, ly1 + pad), label, fill=WHITE, font=font)
+            box_w = tw + pad * 2
+            box_h = th + pad * 2
 
-        return np.array(pil_img)
+            # Candidate positions in priority order:
+            # above-left, above-right, below-left, below-right, inside top-left (last resort)
+            candidates = [
+                (x1,                   max(0, y1 - box_h)),              # above-left
+                (max(0, x2 - box_w),   max(0, y1 - box_h)),              # above-right
+                (x1,                   min(img_h - box_h, y2)),          # below-left
+                (max(0, x2 - box_w),   min(img_h - box_h, y2)),          # below-right
+                (x1,                   y1),                              # inside top-left (fallback)
+            ]
+
+            # Occupied zones = already-placed labels + all OTHER blocks' bboxes
+            occupied = list(placed_labels)
+            for j, other in enumerate(blk_list):
+                if j == i or other.xyxy is None:
+                    continue
+                ox1, oy1, ox2, oy2 = (int(other.xyxy[0]), int(other.xyxy[1]),
+                                       int(other.xyxy[2]), int(other.xyxy[3]))
+                occupied.append((ox1, oy1, ox2, oy2))
+
+            lx1, ly1 = candidates[-1]  # default: inside fallback
+            for cx, cy in candidates:
+                cx = max(0, min(cx, img_w - box_w))
+                cy = max(0, min(cy, img_h - box_h))
+                candidate_rect = (cx, cy, cx + box_w, cy + box_h)
+                if not any(_rects_overlap(candidate_rect, p) for p in occupied):
+                    lx1, ly1 = cx, cy
+                    break
+
+            lx2 = min(lx1 + box_w, img_w)
+            ly2 = min(ly1 + box_h, img_h)
+            placed_labels.append((lx1, ly1, lx2, ly2))
+
+            # Label background
+            draw.rectangle([lx1, ly1, lx2, ly2], fill=RED)
+
+            # Text with black outline for maximum readability
+            # Subtract getbbox offset so text sits flush inside the background rect
+            tx = lx1 + pad - t_left
+            ty = ly1 + pad - t_top
+            for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1), (0, -1), (0, 1), (-1, 0), (1, 0)]:
+                draw.text((tx + dx, ty + dy), label, fill=BLACK, font=font)
+            draw.text((tx, ty), label, fill=YELLOW, font=font)
+
+
+        # Convert back from RGB to BGR for the rest of the pipeline
+        result = np.array(pil_img)
+        if is_color:
+            result = result[..., ::-1].copy()
+
+        return result
 
     def encode_image(self, image: np.ndarray, ext=".jpg"):
         """

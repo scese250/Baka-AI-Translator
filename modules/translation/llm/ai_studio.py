@@ -80,36 +80,23 @@ class AIStudioTranslation(BaseLLMTranslation):
         
         self.model = model_name
         
-        # Advanced Context Awareness - enable for Pro models automatically
+        # Advanced Context Awareness
         llm_settings = settings.get_llm_settings()
-        is_pro_model = "pro" in self.model.lower()
-        
-        # For Pro models, enable Advanced Context Awareness by default
         self.advanced_context_aware = llm_settings.get('advanced_context_aware', False)
-        if is_pro_model and not self.advanced_context_aware:
-            self.advanced_context_aware = True
-            print("[AIStudio] Auto-enabling Advanced Context Awareness for Pro model")
-        
+
         # Context Session settings
         self.context_session_enabled = llm_settings.get('context_session_enabled', False)
         self.context_session_name = llm_settings.get('context_session_name', '') or ''
-        
-        # For Pro models, enable Context Session by default if a session name exists
-        if is_pro_model and self.context_session_name and not self.context_session_enabled:
-            self.context_session_enabled = True
-            print("[AIStudio] Auto-enabling Context Session for Pro model")
-        
+
         # Load existing context if session enabled and named
         if self.context_session_enabled and self.context_session_name:
             self.story_events = self._load_story_context(self.context_session_name)
             if self.story_events:
                 print(f"[AIStudio] Loaded {len(self.story_events)} events from session '{self.context_session_name}'")
-        
-        # Textless Panel settings - enable for Pro models
+
+        # Textless Panel settings
         self.textless_panel_enabled = llm_settings.get('textless_panel_enabled', False)
-        if is_pro_model and not self.textless_panel_enabled:
-            self.textless_panel_enabled = True
-            print("[AIStudio] Auto-enabling Textless Panel for Pro model")
+
         
         # Get credentials (use "AIStudio" as the service key)
         credentials = settings.get_credentials("AIStudio")
