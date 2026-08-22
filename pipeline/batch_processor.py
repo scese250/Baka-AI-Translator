@@ -17,8 +17,8 @@ from modules.translation.base import LLMTranslation
 from modules.translation.factory import TranslationFactory
 from modules.utils.textblock import sort_blk_list
 from modules.utils.pipeline_utils import inpaint_map, get_config, generate_mask, \
-    get_language_code, is_directory_empty, get_smart_text_color, apply_solid_fill_for_uniform_bubbles
-from modules.utils.translator_utils import get_raw_translation, get_raw_text, format_translations
+    get_language_code, is_directory_empty, get_smart_text_color, apply_solid_fill_for_uniform_bubbles, get_inpainter_backend
+from modules.utils.translator_utils import get_raw_translation, get_raw_text, format_translations, filter_rejected_blocks, compress_repeated_chars
 from modules.utils.archives import make
 from modules.rendering.render import get_best_render_area, pyside_word_wrap
 from modules.utils.device import resolve_device
@@ -218,11 +218,11 @@ class BatchProcessor:
         thread_translators = {}  # {thread_id: (Translator, src_lang, tgt_lang)}
         thread_locks = {tid: Lock() for tid in range(max_workers)} if max_workers > 1 else {}
 
-        # Pre-create inpainter (avoids ONNX session creation freeze per image)
-        _inp_backend = 'onnx'
-        _inp_device = resolve_device(settings_page.is_gpu_enabled(), backend=_inp_backend)
+        # Pre-create inpainter (avoids session creation freeze per image)
         _inp_key = settings_page.get_tool_selection('inpainter')
-        _InpainterClass = inpaint_map[_inp_key]
+        _inp_backend = get_inpainter_backend(_inp_key)
+        _inp_device = resolve_device(settings_page.is_gpu_enabled(), backend=_inp_backend)
+        _InpainterClass = inpaint_map.get(_inp_key, inpaint_map.get('LaMa (ONNX)', inpaint_map['LaMa']))
 
         if max_workers > 1:
             thread_inpainters = {}
@@ -441,73 +441,9 @@ class BatchProcessor:
                 if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
                     return
 
-                # Clean Image of text
+                # Translation
                 export_settings = settings_page.get_export_settings()
 
-                # Inpainting
-                if max_workers > 1:
-                    local_inpainter = thread_inpainters[thread_id]
-                else:
-                    if self.inpainting.inpainter_cache is None or self.inpainting.cached_inpainter_key != settings_page.get_tool_selection('inpainter'):
-                        backend = 'onnx'
-                        device = resolve_device(settings_page.is_gpu_enabled(), backend=backend)
-                        inpainter_key = settings_page.get_tool_selection('inpainter')
-                        InpainterClass = inpaint_map[inpainter_key]
-                        self.inpainting.inpainter_cache = InpainterClass(device, backend=backend)
-                        self.inpainting.cached_inpainter_key = inpainter_key
-                    local_inpainter = self.inpainting.inpainter_cache
-
-                config = get_config(settings_page)
-                mask_dilation = settings_page.get_mask_dilation()
-                
-                solid_filled_image = image.copy()
-                solid_fill_mask = np.zeros(image.shape[:2], dtype=np.uint8)
-                remaining_blocks = blk_list
-                
-                t0 = time.time()
-                if remaining_blocks:
-                    mask = generate_mask(solid_filled_image, remaining_blocks, default_padding=mask_dilation)
-                else:
-                    mask = np.zeros(image.shape[:2], dtype=np.uint8)
-                t1 = time.time()
-
-                self.emit_progress(index, total_images, 4, 10, False, _fname)
-                if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
-                    return
-
-                t0 = time.time()
-                if np.any(mask):
-                    inpaint_input_img = local_inpainter(solid_filled_image, mask, config)
-                    inpaint_input_img = imk.convert_scale_abs(inpaint_input_img)
-                    logger.info("\033[92mAI Inpainting took %.2fs\033[0m", time.time() - t0)
-                else:
-                    inpaint_input_img = solid_filled_image
-                    logger.info("\033[92mNo inpainting needed (no mask) in %.2fs\033[0m", time.time() - t0)
-
-                # Patch generation
-                patches = []
-                if max_workers > 1:
-                    # InpaintingHandler has get_inpainted_patches but it is just a utility function wrapper
-                    # We can use self.inpainting.get_inpainted_patches safely as it's static-like logic
-                    patches = self.inpainting.get_inpainted_patches(mask, inpaint_input_img)
-                else:
-                    patches = self.inpainting.get_inpainted_patches(mask, inpaint_input_img)
-                
-                if np.any(solid_fill_mask):
-                    solid_patches = self.inpainting.get_inpainted_patches(solid_fill_mask, solid_filled_image)
-                    patches.extend(solid_patches)
-                
-                self.main_page.patches_processed.emit(patches, image_path)
-
-                if export_settings['export_inpainted_image']:
-                    path = get_save_path("cleaned_images", archive_bname)
-                    imk.write_image(os.path.join(path, f"{base_name}_cleaned{extension}"), inpaint_input_img)
-
-                self.emit_progress(index, total_images, 5, 10, False, _fname)
-                if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
-                    return
-
-                # Translation
                 llm_s = settings_page.get_llm_settings()
                 extra_context = llm_s['extra_context'] if llm_s.get('extra_context_enabled', True) else ''
                 translator_key = settings_page.get_tool_selection('translator')
@@ -620,6 +556,69 @@ class BatchProcessor:
                     path = get_save_path("translated_texts", archive_bname)
                     with open(os.path.join(path, os.path.splitext(os.path.basename(image_path))[0] + "_translated.txt"), 'w', encoding='UTF-8') as file:
                         file.write(entire_translated_text)
+
+                # Post-translation filtering: reject garbage and compress repeated chars
+                rejected_count = filter_rejected_blocks(blk_list)
+                compress_repeated_chars(blk_list)
+                if rejected_count > 0:
+                    logger.info("Rejected %d blocks as OCR garbage", rejected_count)
+
+                self.emit_progress(index, total_images, 4, 10, False, _fname)
+                if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+                    return
+
+                # Clean Image of text (Inpainting) - only non-rejected blocks
+                if max_workers > 1:
+                    local_inpainter = thread_inpainters[thread_id]
+                else:
+                    if self.inpainting.inpainter_cache is None or self.inpainting.cached_inpainter_key != settings_page.get_tool_selection('inpainter'):
+                        inpainter_key = settings_page.get_tool_selection('inpainter')
+                        backend = get_inpainter_backend(inpainter_key)
+                        device = resolve_device(settings_page.is_gpu_enabled(), backend=backend)
+                        InpainterClass = inpaint_map.get(inpainter_key, inpaint_map.get('LaMa (ONNX)', inpaint_map['LaMa']))
+                        self.inpainting.inpainter_cache = InpainterClass(device, backend=backend)
+                        self.inpainting.cached_inpainter_key = inpainter_key
+                    local_inpainter = self.inpainting.inpainter_cache
+
+                config = get_config(settings_page)
+                mask_dilation = settings_page.get_mask_dilation()
+                
+                solid_filled_image = image.copy()
+                solid_fill_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+                remaining_blocks = [blk for blk in blk_list if not blk.rejected]
+                
+                t0 = time.time()
+                if remaining_blocks:
+                    mask = generate_mask(solid_filled_image, remaining_blocks, default_padding=mask_dilation)
+                else:
+                    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+
+                self.emit_progress(index, total_images, 5, 10, False, _fname)
+                if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+                    return
+
+                t0 = time.time()
+                if np.any(mask):
+                    inpaint_input_img = local_inpainter(solid_filled_image, mask, config)
+                    inpaint_input_img = imk.convert_scale_abs(inpaint_input_img)
+                    logger.info("\033[92mAI Inpainting took %.2fs\033[0m", time.time() - t0)
+                else:
+                    inpaint_input_img = solid_filled_image
+                    logger.info("\033[92mNo inpainting needed (no mask) in %.2fs\033[0m", time.time() - t0)
+
+                # Patch generation
+                patches = []
+                patches = self.inpainting.get_inpainted_patches(mask, inpaint_input_img)
+                
+                if np.any(solid_fill_mask):
+                    solid_patches = self.inpainting.get_inpainted_patches(solid_fill_mask, solid_filled_image)
+                    patches.extend(solid_patches)
+                
+                self.main_page.patches_processed.emit(patches, image_path)
+
+                if export_settings['export_inpainted_image']:
+                    path = get_save_path("cleaned_images", archive_bname)
+                    imk.write_image(os.path.join(path, f"{base_name}_cleaned{extension}"), inpaint_input_img)
 
                 self.emit_progress(index, total_images, 7, 10, False, _fname)
                 if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
@@ -755,10 +754,8 @@ class BatchProcessor:
                 render_save_dir = get_save_path(None, archive_bname)
                 sv_pth = os.path.join(render_save_dir, f"{base_name}{extension}")
 
-                renderer = ImageSaveRenderer(image)
+                renderer = ImageSaveRenderer(inpaint_input_img)
                 viewer_state = self.main_page.image_states[image_path]['viewer_state'].copy()
-                patches = self.main_page.image_patches.get(image_path, [])
-                renderer.apply_patches(patches)
                 renderer.add_state_to_image(viewer_state)
                 renderer.save_image(sv_pth, _image_quality)
 
@@ -1061,6 +1058,12 @@ class BatchProcessor:
                 with open(os.path.join(path, os.path.splitext(os.path.basename(image_path))[0] + "_translated.txt"), 'w', encoding='UTF-8') as file:
                     file.write(entire_translated_text)
 
+            # Post-translation filtering: reject garbage and compress repeated chars
+            rejected_count = filter_rejected_blocks(blk_list)
+            compress_repeated_chars(blk_list)
+            if rejected_count > 0:
+                logger.info("[Phase 1] Rejected %d blocks as OCR garbage", rejected_count)
+
             # ─── Cache results for Phase 2 ───
             deferred_cache[image_path] = {
                 'skip': False, 'no_blocks': False,
@@ -1089,10 +1092,10 @@ class BatchProcessor:
             return
 
         # Pre-create inpainter for Phase 2
-        _inp_backend = 'onnx'
-        _inp_device = resolve_device(settings_page.is_gpu_enabled(), backend=_inp_backend)
         _inp_key = settings_page.get_tool_selection('inpainter')
-        _InpainterClass = inpaint_map[_inp_key]
+        _inp_backend = get_inpainter_backend(_inp_key)
+        _inp_device = resolve_device(settings_page.is_gpu_enabled(), backend=_inp_backend)
+        _InpainterClass = inpaint_map.get(_inp_key, inpaint_map.get('LaMa (ONNX)', inpaint_map['LaMa']))
         self.inpainting.inpainter_cache = _InpainterClass(_inp_device, backend=_inp_backend)
         self.inpainting.cached_inpainter_key = _inp_key
         logger.info("Pre-created inpainter for Phase 2.")
@@ -1167,7 +1170,7 @@ class BatchProcessor:
 
             solid_filled_image = image.copy()
             solid_fill_mask = np.zeros(image.shape[:2], dtype=np.uint8)
-            remaining_blocks = blk_list
+            remaining_blocks = [blk for blk in blk_list if not blk.rejected]
 
             t0 = time.time()
             if remaining_blocks:
@@ -1323,9 +1326,8 @@ class BatchProcessor:
             render_save_dir = get_save_path(None, archive_bname)
             sv_pth = os.path.join(render_save_dir, f"{base_name}{extension}")
 
-            renderer = ImageSaveRenderer(image)
+            renderer = ImageSaveRenderer(inpaint_input_img)
             viewer_state = self.main_page.image_states[image_path]['viewer_state'].copy()
-            renderer.apply_patches(local_patches)
             renderer.add_state_to_image(viewer_state)
             renderer.save_image(sv_pth, _image_quality)
 

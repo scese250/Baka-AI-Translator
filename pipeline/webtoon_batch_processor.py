@@ -15,14 +15,13 @@ from modules.detection.processor import TextBlockDetector
 from modules.translation.processor import Translator
 from modules.utils.textblock import sort_blk_list, TextBlock
 from modules.utils.pipeline_utils import inpaint_map, get_config, generate_mask, \
-    get_language_code, is_directory_empty, get_smart_text_color, apply_solid_fill_for_uniform_bubbles
-from modules.utils.translator_utils import format_translations
+    get_language_code, is_directory_empty, get_smart_text_color, apply_solid_fill_for_uniform_bubbles, get_inpainter_backend
+from modules.utils.translator_utils import format_translations, get_raw_text, get_raw_translation, filter_rejected_blocks, compress_repeated_chars
 from modules.utils.archives import make
 from modules.rendering.render import get_best_render_area, pyside_word_wrap
 from app.ui.canvas.text_item import OutlineInfo, OutlineType
 from app.ui.canvas.text.text_item_properties import TextItemProperties
 from app.ui.canvas.save_renderer import ImageSaveRenderer
-from modules.utils.translator_utils import format_translations, get_raw_text, get_raw_translation 
 from modules.utils.device import resolve_device
 from .virtual_page import VirtualPage, VirtualPageCreator, PageStatus
 
@@ -300,82 +299,7 @@ class WebtoonBatchProcessor:
         if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
             return None
 
-        # Inpainting processing
-        if self.inpainting.inpainter_cache is None or self.inpainting.cached_inpainter_key != self.main_page.settings_page.get_tool_selection('inpainter'):
-            backend = 'onnx'
-            device = resolve_device(
-                self.main_page.settings_page.is_gpu_enabled(),
-                backend=backend
-            )
-            inpainter_key = self.main_page.settings_page.get_tool_selection('inpainter')
-            InpainterClass = inpaint_map[inpainter_key]
-            self.inpainting.inpainter_cache = InpainterClass(device, backend=backend)
-            self.inpainting.cached_inpainter_key = inpainter_key
-        
-        # Progress update: Inpainting setup completed
-        self.main_page.progress_update.emit(current_physical_page, total_images, 3, 10, False)
-        if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
-            return None
-        
-        config = get_config(self.main_page.settings_page)
-        mask_dilation = self.main_page.settings_page.get_mask_dilation()
-        
-        # DISABLED: Solid color fill optimization
-        # User requested to always use AI inpainting instead of solid fill
-        # Original code kept for reference:
-        # solid_filled_image, solid_fill_mask, remaining_blocks = apply_solid_fill_for_uniform_bubbles(
-        #     combined_image, blk_list, mask_dilation
-        # )
-        
-        # Skip solid fill - use all blocks for AI inpainting
-        solid_filled_image = combined_image.copy()
-        solid_fill_mask = np.zeros(combined_image.shape[:2], dtype=np.uint8)
-        remaining_blocks = blk_list
-        
-        # Generate mask for ALL blocks (no optimization)
-        if remaining_blocks:
-            mask = generate_mask(solid_filled_image, remaining_blocks, default_padding=mask_dilation)
-        else:
-            mask = np.zeros(combined_image.shape[:2], dtype=np.uint8)
-        
-        # Apply AI inpainting to ALL blocks
-        if np.any(mask):
-            inpaint_input_img = self.inpainting.inpainter_cache(solid_filled_image, mask, config)
-            inpaint_input_img = imk.convert_scale_abs(inpaint_input_img)
-        else:
-            inpaint_input_img = solid_filled_image
-        
-        # Progress update: Inpainting execution completed
-        self.main_page.progress_update.emit(current_physical_page, total_images, 4, 10, False)
-        if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
-            return None
-        
-        # Calculate inpaint patches for virtual pages (combine AI and solid fill)
-        virtual_page_patches = self._calculate_virtual_inpaint_patches(mask, inpaint_input_img, mapping_data)
-        
-        # Also add solid fill patches
-        if np.any(solid_fill_mask):
-            solid_patches = self._calculate_virtual_inpaint_patches(solid_fill_mask, solid_filled_image, mapping_data)
-            for vpage_id, patches in solid_patches.items():
-                if vpage_id in virtual_page_patches:
-                    virtual_page_patches[vpage_id].extend(patches)
-                else:
-                    virtual_page_patches[vpage_id] = patches
-
-        # Progress update: Patch calculation completed
-        self.main_page.progress_update.emit(current_physical_page, total_images, 5, 10, False)
-        if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
-            return None
-
-        # if blk_list:
-        #     get_best_render_area(blk_list, combined_image, inpaint_input_img)
-
-        # Progress update: Pre-translation setup completed
-        self.main_page.progress_update.emit(current_physical_page, total_images, 6, 10, False)
-        if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
-            return None
-
-        # Translation processing (only if blocks exist)
+        # Translation processing (only if blocks exist) - BEFORE inpainting
         if blk_list:
             source_lang = self.main_page.image_states[vpage1.physical_page_path]['source_lang']
             target_lang = self.main_page.image_states[vpage1.physical_page_path]['target_lang']
@@ -408,7 +332,88 @@ class WebtoonBatchProcessor:
                 for blk in blk_list:
                     blk.translation = ""
 
+            # Post-translation filtering: reject garbage and compress repeated chars
+            rejected_count = filter_rejected_blocks(blk_list)
+            compress_repeated_chars(blk_list)
+            if rejected_count > 0:
+                logger.info("Rejected %d blocks as OCR garbage in chunk %s", rejected_count, chunk_id)
+
         # Progress update: Translation processing completed
+        self.main_page.progress_update.emit(current_physical_page, total_images, 3, 10, False)
+        if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+            return None
+
+        # Inpainting processing - only non-rejected blocks
+        if self.inpainting.inpainter_cache is None or self.inpainting.cached_inpainter_key != self.main_page.settings_page.get_tool_selection('inpainter'):
+            inpainter_key = self.main_page.settings_page.get_tool_selection('inpainter')
+            backend = get_inpainter_backend(inpainter_key)
+            device = resolve_device(
+                self.main_page.settings_page.is_gpu_enabled(),
+                backend=backend
+            )
+            InpainterClass = inpaint_map.get(inpainter_key, inpaint_map.get('LaMa (ONNX)', inpaint_map['LaMa']))
+            self.inpainting.inpainter_cache = InpainterClass(device, backend=backend)
+            self.inpainting.cached_inpainter_key = inpainter_key
+        
+        # Progress update: Inpainting setup completed
+        self.main_page.progress_update.emit(current_physical_page, total_images, 4, 10, False)
+        if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+            return None
+        
+        config = get_config(self.main_page.settings_page)
+        mask_dilation = self.main_page.settings_page.get_mask_dilation()
+        
+        # DISABLED: Solid color fill optimization
+        # User requested to always use AI inpainting instead of solid fill
+        # Original code kept for reference:
+        # solid_filled_image, solid_fill_mask, remaining_blocks = apply_solid_fill_for_uniform_bubbles(
+        #     combined_image, blk_list, mask_dilation
+        # )
+        
+        # Skip solid fill - use only non-rejected blocks for AI inpainting
+        solid_filled_image = combined_image.copy()
+        solid_fill_mask = np.zeros(combined_image.shape[:2], dtype=np.uint8)
+        remaining_blocks = [blk for blk in blk_list if not blk.rejected]
+        
+        # Generate mask for non-rejected blocks only
+        if remaining_blocks:
+            mask = generate_mask(solid_filled_image, remaining_blocks, default_padding=mask_dilation)
+        else:
+            mask = np.zeros(combined_image.shape[:2], dtype=np.uint8)
+        
+        # Apply AI inpainting to non-rejected blocks
+        if np.any(mask):
+            inpaint_input_img = self.inpainting.inpainter_cache(solid_filled_image, mask, config)
+            inpaint_input_img = imk.convert_scale_abs(inpaint_input_img)
+        else:
+            inpaint_input_img = solid_filled_image
+        
+        # Progress update: Inpainting execution completed
+        self.main_page.progress_update.emit(current_physical_page, total_images, 5, 10, False)
+        if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+            return None
+        
+        # Calculate inpaint patches for virtual pages (combine AI and solid fill)
+        virtual_page_patches = self._calculate_virtual_inpaint_patches(mask, inpaint_input_img, mapping_data)
+        
+        # Also add solid fill patches
+        if np.any(solid_fill_mask):
+            solid_patches = self._calculate_virtual_inpaint_patches(solid_fill_mask, solid_filled_image, mapping_data)
+            for vpage_id, patches in solid_patches.items():
+                if vpage_id in virtual_page_patches:
+                    virtual_page_patches[vpage_id].extend(patches)
+                else:
+                    virtual_page_patches[vpage_id] = patches
+
+        # Progress update: Patch calculation completed
+        self.main_page.progress_update.emit(current_physical_page, total_images, 6, 10, False)
+        if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
+            return None
+
+        # if blk_list:
+        #     get_best_render_area(blk_list, combined_image, inpaint_input_img)
+
+        # Progress update: Pre-rendering setup completed
         self.main_page.progress_update.emit(current_physical_page, total_images, 7, 10, False)
         if self.main_page.current_worker and self.main_page.current_worker.is_cancelled:
             return None

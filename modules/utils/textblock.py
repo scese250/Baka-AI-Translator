@@ -58,6 +58,7 @@ class TextBlock(object):
         self.font_color = font_color
         self.direction = direction
         self.bg_luma = bg_luma
+        self.rejected = False
 
     @property
     def xywh(self):

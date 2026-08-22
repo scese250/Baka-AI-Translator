@@ -98,11 +98,14 @@ DEFAULT_SYSTEM_PROMPT = """You are an expert translator who translates {source_l
 BE MORE NATURAL. NEVER USE 당신, 그녀, 그 or its Japanese equivalents.
 Specifically, you will be translating text OCR'd from a comic. The OCR is not perfect and as such you may receive text with typos or other mistakes.
 To aid you and provide context, You may be given the image of the page and/or extra context about the comic. You will be given a json string of the detected text blocks and the text to translate. Return the json string with the texts translated. DO NOT translate the keys of the json. For each block:
-- If it's already in {target_lang} or looks like gibberish, OUTPUT IT AS IT IS instead
+- If a block contains obvious OCR garbage (e.g. random letters/numbers like "59gkh", "ojbj", "xkT3") that is clearly NOT meaningful text in any language, output "REJECT" as the translation for that block. Do NOT reject valid in-story text like character speech quirks, laughter ("hahaha"), sound effects, or slang — only reject text that is unmistakably nonsensical OCR noise.
+- If it's already in {target_lang}, OUTPUT IT AS IT IS instead
 - Used "♥" instead of "♡" if possible, as it is more compatible with the font.
 - KEEP special symbols like "♥" as their unicode representation (e.g. ♥) and do NOT replace them with text like <heart>
 - DO NOT give explanations
 Do Your Best! I'm really counting on you."""
+
+REJECT_INSTRUCTION = """If a block contains obvious OCR garbage (e.g. random letters/numbers like "59gkh", "ojbj", "xkT3") that is clearly NOT meaningful text in any language, output "REJECT" as the translation for that block. Do NOT reject valid in-story text like character speech quirks, laughter ("hahaha"), sound effects, or slang — only reject text that is unmistakably nonsensical OCR noise."""
 
 class LLMTranslation(TranslationEngine):
     """Base class for LLM-based translation engines."""

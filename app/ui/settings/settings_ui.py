@@ -54,7 +54,7 @@ class SettingsPageUI(QtWidgets.QWidget):
         self.credential_widgets = {}
         self.export_widgets = {}
 
-        self.inpainters = ['LaMa', 'AOT']
+        self.inpainters = ['LaMa (ONNX)', 'LaMa (PyTorch)', 'AOT']
         self.detectors = ['RT-DETR-v2']
         self.ocr_engines = [self.tr("Default"), self.tr('Microsoft OCR'), self.tr('Google Cloud Vision'), self.tr('Gemini-2.0-Flash'), self.tr('GPT-4.1-mini'), self.tr('Gemini-3.0-Flash (Cookies)')]
         self.inpaint_strategy = [self.tr('Resize'), self.tr('Original'), self.tr('Crop')]
@@ -163,7 +163,9 @@ class SettingsPageUI(QtWidgets.QWidget):
             self.tr("Gemini-3.0-Flash (Cookies)"): "Gemini-3.0-Flash (Cookies)",
 
             # Inpainter mappings
-            "LaMa": "LaMa",
+            "LaMa (ONNX)": "LaMa (ONNX)",
+            "LaMa (PyTorch)": "LaMa (PyTorch)",
+            "LaMa": "LaMa (ONNX)",
             "AOT": "AOT",
 
             # Detector mappings

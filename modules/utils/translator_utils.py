@@ -57,9 +57,14 @@ def set_texts_from_json(blk_list: list[TextBlock], json_string: str):
             for idx, blk in enumerate(blk_list):
                 block_key = f"block_{idx}"
                 if block_key in translation_dict:
-                    # Reemplazar ♡ por ♥ en la traducción de salida
                     translation = translation_dict[block_key]
-                    blk.translation = translation.replace("♡", "♥") if translation else translation
+                    # Handle REJECT from AI
+                    if translation and translation.strip().upper() == "REJECT":
+                        blk.translation = ""
+                        blk.rejected = True
+                    else:
+                        # Reemplazar ♡ por ♥ en la traducción de salida
+                        blk.translation = translation.replace("♡", "♥") if translation else translation
                 else:
                     print(f"Warning: {block_key} not found in JSON string.")
                     
@@ -92,6 +97,61 @@ def set_upper_case(blk_list: list[TextBlock], upper_case: bool):
             blk.translation = translation.lower().capitalize()
         else:
             blk.translation = translation
+
+def filter_rejected_blocks(blk_list: list[TextBlock]) -> int:
+    """
+    Post-translation filter: marks blocks as rejected if their translation
+    is 'REJECT' (from AI) or consists entirely of punctuation/symbols.
+    Rejected blocks will not be inpainted or rendered.
+    
+    Returns the count of rejected blocks.
+    """
+    # Punctuation-only regex: matches strings that are ONLY whitespace + common punctuation
+    punct_pattern = re.compile(r'^[\s.,\'"!?;:\-_=+*#@&()\[\]{}|/\\~^`]+$')
+    rejected_count = 0
+    
+    for blk in blk_list:
+        if blk.rejected:
+            # Already rejected (e.g. by set_texts_from_json)
+            rejected_count += 1
+            continue
+        
+        translation = blk.translation
+        if not translation:
+            continue
+        
+        stripped = translation.strip()
+        
+        # Check AI REJECT
+        if stripped.upper() == "REJECT":
+            blk.translation = ""
+            blk.rejected = True
+            rejected_count += 1
+            continue
+        
+        # Check punctuation-only translation
+        if punct_pattern.match(stripped):
+            blk.translation = ""
+            blk.rejected = True
+            rejected_count += 1
+            continue
+    
+    return rejected_count
+
+def compress_repeated_chars(blk_list: list[TextBlock]):
+    """
+    Post-translation normalization: collapses runs of 4+ identical
+    characters down to 3. For example:
+      'aaaaaaaaaaaaaaah' -> 'aaah'
+      'NOOOOOOOOO' -> 'NOOO'
+      'jajajaja' -> unchanged (alternating pattern, not single repeated char)
+    """
+    repeat_pattern = re.compile(r'(.)\1{3,}')
+    
+    for blk in blk_list:
+        if blk.rejected or not blk.translation:
+            continue
+        blk.translation = repeat_pattern.sub(r'\1\1\1', blk.translation)
 
 def get_chinese_tokens(text):
     return list(jieba.cut(text, cut_all=False))

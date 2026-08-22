@@ -4,7 +4,7 @@ from abc import abstractmethod
 import base64
 import imkit as imk
 
-from ..base import LLMTranslation
+from ..base import LLMTranslation, REJECT_INSTRUCTION
 from ...utils.textblock import TextBlock
 from ...utils.translator_utils import get_raw_text, set_texts_from_json
 
@@ -68,6 +68,8 @@ class BaseLLMTranslation(LLMTranslation):
                  # Fallback if user messed up placeholders, just use as is or try to use default if really broken? 
                  # We will use as is to respect user's "hardcoded" input if they didn't want placeholders.
                  system_prompt = self.system_prompt
+             # Append REJECT instruction to custom prompts
+             system_prompt = f"{system_prompt}\n{REJECT_INSTRUCTION}"
         else:
              system_prompt = self.get_system_prompt(self.source_lang, self.target_lang)
 

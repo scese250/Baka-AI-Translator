@@ -3,7 +3,7 @@ import logging
 import imkit as imk
 
 from modules.utils.device import resolve_device
-from modules.utils.pipeline_utils import inpaint_map, get_config
+from modules.utils.pipeline_utils import inpaint_map, get_config, get_inpainter_backend
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +33,10 @@ class InpaintingHandler:
             return None
 
         if self.inpainter_cache is None or self.cached_inpainter_key != settings_page.get_tool_selection('inpainter'):
-            backend = 'onnx'
-            device = resolve_device(settings_page.is_gpu_enabled(), backend)
             inpainter_key = settings_page.get_tool_selection('inpainter')
-            InpainterClass = inpaint_map[inpainter_key]
+            backend = get_inpainter_backend(inpainter_key)
+            device = resolve_device(settings_page.is_gpu_enabled(), backend)
+            InpainterClass = inpaint_map.get(inpainter_key, inpaint_map.get('LaMa (ONNX)', inpaint_map['LaMa']))
             self.inpainter_cache = InpainterClass(device, backend=backend)
             self.cached_inpainter_key = inpainter_key
 

@@ -77,7 +77,7 @@ class HeadlessSettingsPage:
         result = self._settings.value(tool_type, {
             'translator': 'Gemini-3.0-Flash',
             'ocr': 'Default', 
-            'inpainter': 'LaMa',
+            'inpainter': 'LaMa (ONNX)',
             'detector': 'RT-DETR-V2',
         }.get(tool_type, ''))
         self._settings.endGroup()

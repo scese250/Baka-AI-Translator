@@ -52,9 +52,16 @@ def get_layout_direction(language: str) -> Qt.LayoutDirection:
 
 inpaint_map = {
     "LaMa": LaMa,
+    "LaMa (ONNX)": LaMa,
+    "LaMa (PyTorch)": LaMa,
     "MI-GAN": MIGAN,
     "AOT": AOT,
 }
+
+def get_inpainter_backend(inpainter_key: str) -> str:
+    if inpainter_key and ("pytorch" in inpainter_key.lower() or "torch" in inpainter_key.lower()):
+        return "torch"
+    return "onnx"
 
 def get_config(settings_page):
     strategy_settings = settings_page.get_hd_strategy_settings()
@@ -217,6 +224,9 @@ def generate_mask(img: np.ndarray, blk_list: list[TextBlock], default_padding: i
     LONG_EDGE = 2048
 
     for blk in blk_list:
+        # Skip rejected blocks (OCR garbage confirmed by AI)
+        if getattr(blk, 'rejected', False):
+            continue
         # Skip blocks with no text and no translation
         if not blk.text and not blk.translation:
             continue

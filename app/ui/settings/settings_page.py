@@ -43,6 +43,7 @@ TRANSLATOR_MIGRATIONS = {
 
 INPAINTER_MIGRATIONS = {
     "MI-GAN": "AOT",
+    "LaMa": "LaMa (ONNX)",
 }
 
 class SettingsPage(QtWidgets.QWidget):
@@ -447,7 +448,7 @@ class SettingsPage(QtWidgets.QWidget):
         translated_ocr = self.ui.reverse_mappings.get(ocr, ocr)
         self.ui.ocr_combo.setCurrentText(translated_ocr)
 
-        raw_inpainter = settings.value('inpainter', 'LaMa')
+        raw_inpainter = settings.value('inpainter', 'LaMa (ONNX)')
         inpainter = INPAINTER_MIGRATIONS.get(raw_inpainter, raw_inpainter)
         translated_inpainter = self.ui.reverse_mappings.get(inpainter, inpainter)
         self.ui.inpainter_combo.setCurrentText(translated_inpainter)
