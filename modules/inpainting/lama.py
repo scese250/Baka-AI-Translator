@@ -2,7 +2,7 @@ import os
 import numpy as np
 import imkit as imk
 import onnxruntime as ort
-from ..utils.device import get_providers
+from ..utils.device import get_providers, torch_available
 
 from ..utils.inpainting import (
     norm_img,
@@ -29,6 +29,8 @@ class LaMa(InpaintModel):
             providers = get_providers(device)
             self.session = ort.InferenceSession(onnx_path, providers=providers)
         else:
+            if not torch_available():
+                raise RuntimeError("PyTorch ('torch') is not installed in this environment. Select 'LaMa (ONNX)' in Settings, or install PyTorch.")
             ModelDownloader.get(ModelID.LAMA_JIT)
             local_path = ModelDownloader.primary_path(ModelID.LAMA_JIT) 
             self.model = load_jit_model(local_path, device)

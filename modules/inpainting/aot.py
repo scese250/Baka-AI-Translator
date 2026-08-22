@@ -2,7 +2,7 @@ import numpy as np
 import imkit as imk
 from PIL import Image
 import onnxruntime as ort
-from modules.utils.device import get_providers
+from modules.utils.device import get_providers, torch_available
 
 from .base import InpaintModel
 from .schema import Config
@@ -27,6 +27,8 @@ class AOT(InpaintModel):
             providers = get_providers(device)
             self.session = ort.InferenceSession(onnx_path, providers=providers)
         else:
+            if not torch_available():
+                raise RuntimeError("PyTorch ('torch') is not installed in this environment. Select an ONNX inpainter in Settings, or install PyTorch.")
             ModelDownloader.get(ModelID.AOT_JIT)
             local_path = ModelDownloader.primary_path(ModelID.AOT_JIT)
             self.model = load_jit_model(local_path, device)
