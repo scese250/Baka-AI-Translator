@@ -40,6 +40,56 @@ def get_raw_translation(blk_list: list[TextBlock]):
     
     return raw_translations_json
 
+def _repair_json_quotes(s: str) -> str:
+    """
+    Repair common AI-generated JSON quote issues:
+    - Replace curly/smart quotes (\u201c \u201d) with escaped straight quotes.
+    - Escape unescaped straight double-quotes inside JSON string values
+      (i.e., not acting as JSON structural delimiters).
+    """
+    # Step 1: replace curly quotes with escaped straight quotes
+    s = s.replace('\u201c', '\\"').replace('\u201d', '\\"')
+
+    # Step 2: character-by-character scan to escape unescaped " inside strings
+    result = []
+    in_string = False
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch == '\\' and in_string:
+            # Escaped character — keep as-is (consume next char too)
+            result.append(ch)
+            i += 1
+            if i < len(s):
+                result.append(s[i])
+                i += 1
+            continue
+        if ch == '"':
+            if not in_string:
+                in_string = True
+                result.append(ch)
+            else:
+                # Peek at next non-whitespace character.
+                # Valid JSON string terminators:
+                #   ':' — closing a key
+                #   ',' '}' ']' — closing a value
+                #   '' (end of string) — edge case
+                j = i + 1
+                while j < len(s) and s[j] in ' \t\r\n':
+                    j += 1
+                next_ch = s[j] if j < len(s) else ''
+                if next_ch in (':', ',', '}', ']', ''):
+                    in_string = False
+                    result.append(ch)
+                else:
+                    # Unescaped quote inside a string value — escape it
+                    result.append('\\"')
+        else:
+            result.append(ch)
+        i += 1
+    return ''.join(result)
+
+
 def set_texts_from_json(blk_list: list[TextBlock], json_string: str):
     # Try to clean common formatting issues
     # 1. Remove markdown code blocks if present
@@ -53,38 +103,40 @@ def set_texts_from_json(blk_list: list[TextBlock], json_string: str):
         json_string = match.group(0)
         try:
             translation_dict = json.loads(json_string)
-            
-            for idx, blk in enumerate(blk_list):
-                block_key = f"block_{idx}"
-                if block_key in translation_dict:
-                    translation = translation_dict[block_key]
-                    # Handle REJECT from AI
-                    if translation and translation.strip().upper() == "REJECT":
-                        blk.translation = ""
-                        blk.rejected = True
-                    else:
-                        # Reemplazar ♡ por ♥ en la traducción de salida
-                        blk.translation = translation.replace("♡", "♥") if translation else translation
+        except json.JSONDecodeError:
+            # Attempt to repair quote issues and retry
+            repaired = _repair_json_quotes(json_string)
+            try:
+                translation_dict = json.loads(repaired)
+            except json.JSONDecodeError as e:
+                error_msg = f"JSON parsing failed at line {e.lineno}, column {e.colno}: {e.msg}"
+                print(f"\nERROR: {error_msg}")
+                print(f"Problematic JSON (first 1000 chars):\n{json_string[:1000]}")
+                raise json.JSONDecodeError(
+                    f"{e.msg}\n\nProblematic JSON snippet:\n{json_string[:500]}",
+                    e.doc,
+                    e.pos
+                ) from e
+
+        for idx, blk in enumerate(blk_list):
+            block_key = f"block_{idx}"
+            if block_key in translation_dict:
+                translation = translation_dict[block_key]
+                # Handle REJECT from AI
+                if translation and translation.strip().upper() == "REJECT":
+                    blk.translation = ""
+                    blk.rejected = True
                 else:
-                    print(f"Warning: {block_key} not found in JSON string.")
-                    
-        except json.JSONDecodeError as e:
-            # Provide detailed error information
-            error_msg = f"JSON parsing failed at line {e.lineno}, column {e.colno}: {e.msg}"
-            print(f"\nERROR: {error_msg}")
-            print(f"Problematic JSON (first 1000 chars):\n{json_string[:1000]}")
-            
-            # Re-raise with more context
-            raise json.JSONDecodeError(
-                f"{e.msg}\n\nProblematic JSON snippet:\n{json_string[:500]}",
-                e.doc,
-                e.pos
-            ) from e
+                    # Reemplazar ♡ por ♥ en la traducción de salida
+                    blk.translation = translation.replace("♡", "♥") if translation else translation
+            else:
+                print(f"Warning: {block_key} not found in JSON string.")
     else:
         error_msg = "No JSON found in the input string."
         print(f"\nERROR: {error_msg}")
         print(f"Raw response (first 1000 chars):\n{cleaned[:1000]}")
         raise ValueError(f"{error_msg}\n\nRaw response snippet:\n{cleaned[:500]}")
+
 
 def set_upper_case(blk_list: list[TextBlock], upper_case: bool):
     for blk in blk_list:

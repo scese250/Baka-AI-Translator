@@ -186,6 +186,25 @@ class BaseLLMTranslation(LLMTranslation):
 
         placed_labels = []  # list of (lx1, ly1, lx2, ly2) already drawn
 
+        # Pre-compute bboxes and distance thresholds for adaptive font sizing
+        avg_dim = (img_w + img_h) / 2
+        ISOLATED = avg_dim * 0.18   # beyond this → isolated → scale up
+        CLOSE    = avg_dim * 0.06   # below this → crowded → scale down
+
+        all_bboxes = []
+        for _blk in blk_list:
+            if _blk.xyxy is not None:
+                all_bboxes.append((int(_blk.xyxy[0]), int(_blk.xyxy[1]),
+                                   int(_blk.xyxy[2]), int(_blk.xyxy[3])))
+            else:
+                all_bboxes.append(None)
+
+        def _bbox_gap(a, b):
+            """Pixel gap between two bboxes (0 if overlapping)."""
+            dx = max(0, max(a[0], b[0]) - min(a[2], b[2]))
+            dy = max(0, max(a[1], b[1]) - min(a[3], b[3]))
+            return (dx * dx + dy * dy) ** 0.5
+
         for i, blk in enumerate(blk_list):
             # Use text bbox (xyxy) — tighter than the full speech bubble
             bbox = blk.xyxy
@@ -193,6 +212,7 @@ class BaseLLMTranslation(LLMTranslation):
                 continue
 
             x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+            bbox_w = x2 - x1
 
             # Draw bounding box (multi-pixel outline)
             for offset in range(lw):
@@ -201,16 +221,52 @@ class BaseLLMTranslation(LLMTranslation):
                     outline=RED
                 )
 
-            # Measure label text
+            # Adaptive font size based on proximity to nearest other block
+            this_b = all_bboxes[i]
+            if this_b is not None and len(all_bboxes) > 1:
+                dists = [_bbox_gap(this_b, b) for j, b in enumerate(all_bboxes)
+                         if b is not None and j != i]
+                min_dist = min(dists) if dists else float('inf')
+            else:
+                min_dist = float('inf')
+
+            if min_dist > ISOLATED:
+                # Isolated — scale up, max 2×
+                t = min(1.0, (min_dist - ISOLATED) / ISOLATED)
+                local_font_size = min(int(font_size * 2), int(font_size * (1.0 + t)))
+            elif min_dist < CLOSE:
+                # Crowded — scale down toward 0.6×
+                t = min_dist / CLOSE
+                local_font_size = max(8, int(font_size * (0.6 + 0.4 * t)))
+            else:
+                local_font_size = font_size
+
+            # Measure label, shrinking font until it fits within bbox_w
             label = f"BLOCK {i}"
+            blk_font_size = local_font_size
             try:
-                tb = font.getbbox(label)
-                # tb = (left, top, right, bottom); offset must be subtracted when drawing
-                t_left, t_top = tb[0], tb[1]
-                tw, th = tb[2] - t_left, tb[3] - t_top
-            except AttributeError:
-                tw, th = font.getsize(label)
-                t_left, t_top = 0, 0
+                blk_font = ImageFont.truetype(font_path, size=blk_font_size)
+            except (IOError, OSError):
+                blk_font = ImageFont.load_default()
+
+            def _measure(f, lbl):
+                try:
+                    tb = f.getbbox(lbl)
+                    return tb[0], tb[1], tb[2] - tb[0], tb[3] - tb[1]
+                except AttributeError:
+                    w, h = f.getsize(lbl)
+                    return 0, 0, w, h
+
+            t_left, t_top, tw, th = _measure(blk_font, label)
+
+            MIN_FONT = 8
+            while tw > bbox_w and blk_font_size > MIN_FONT:
+                blk_font_size = max(MIN_FONT, blk_font_size - 2)
+                try:
+                    blk_font = ImageFont.truetype(font_path, size=blk_font_size)
+                except (IOError, OSError):
+                    blk_font = ImageFont.load_default()
+                t_left, t_top, tw, th = _measure(blk_font, label)
 
             pad = 3
             box_w = tw + pad * 2
@@ -252,12 +308,11 @@ class BaseLLMTranslation(LLMTranslation):
             draw.rectangle([lx1, ly1, lx2, ly2], fill=RED)
 
             # Text with black outline for maximum readability
-            # Subtract getbbox offset so text sits flush inside the background rect
             tx = lx1 + pad - t_left
             ty = ly1 + pad - t_top
             for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1), (0, -1), (0, 1), (-1, 0), (1, 0)]:
-                draw.text((tx + dx, ty + dy), label, fill=BLACK, font=font)
-            draw.text((tx, ty), label, fill=YELLOW, font=font)
+                draw.text((tx + dx, ty + dy), label, fill=BLACK, font=blk_font)
+            draw.text((tx, ty), label, fill=YELLOW, font=blk_font)
 
 
         # Convert back from RGB to BGR for the rest of the pipeline
