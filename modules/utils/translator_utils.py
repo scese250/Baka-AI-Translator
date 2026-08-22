@@ -98,6 +98,27 @@ def set_upper_case(blk_list: list[TextBlock], upper_case: bool):
         else:
             blk.translation = translation
 
+def normalize_quotes(blk_list: list[TextBlock]):
+    """
+    Post-translation filter: replaces Spanish guillemets and curly quotes
+    with straight double quotes in all translated blocks.
+    
+    Replacements:
+      « » → "
+      \u201c \u201d → "
+    """
+    for blk in blk_list:
+        if not blk.translation:
+            continue
+        blk.translation = (
+            blk.translation
+            .replace('\u00ab', '"')   # «
+            .replace('\u00bb', '"')   # »
+            .replace('\u201c', '"')   # "
+            .replace('\u201d', '"')   # "
+        )
+
+
 def filter_rejected_blocks(blk_list: list[TextBlock]) -> int:
     """
     Post-translation filter: marks blocks as rejected if their translation

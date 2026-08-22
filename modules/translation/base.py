@@ -107,6 +107,13 @@ Do Your Best! I'm really counting on you."""
 
 REJECT_INSTRUCTION = """If a block contains obvious OCR garbage (e.g. random letters/numbers like "59gkh", "ojbj", "xkT3") that is clearly NOT meaningful text in any language, output "REJECT" as the translation for that block. Do NOT reject valid in-story text like character speech quirks, laughter ("hahaha"), sound effects, or slang — only reject text that is unmistakably nonsensical OCR noise."""
 
+HYPHEN_INSTRUCTION = """DO NOT split words with hyphens for line-wrapping. Write every word completely. The rendering engine handles line breaks automatically."""
+
+ANNOTATED_PROMPT = """The image has each text block marked with its block number (e.g. "BLOCK 0", "BLOCK 1", ...).
+Use the marked regions as visual reference to:
+- Correct OCR errors: if the detected text doesn't match what you can read inside the marked block, fix it.
+- Reject false positives: if a marked block contains no real text (e.g. it covers a texture, pattern, or empty area with no readable characters), output "REJECT" for that block."""
+
 class LLMTranslation(TranslationEngine):
     """Base class for LLM-based translation engines."""
     
